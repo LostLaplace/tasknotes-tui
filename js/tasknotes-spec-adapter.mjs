@@ -34,33 +34,27 @@ function send(operation, input) {
 }
 
 const localMetadata = await send("meta.claim", {}).then((response) => response.result);
+const preferRust = process.env.TASKNOTES_TUI_BRIDGE_MODE === "rust";
 
-export const metadata = {
-  implementation: "tasknotes-tui",
-  version: localMetadata.version,
-  spec_version: localMetadata.spec_version,
-  validation_modes: Array.from(
-    new Set([...(localMetadata.validation_modes || []), ...(fallbackMetadata.validation_modes || [])]),
-  ),
-  profiles: Array.from(new Set([...(localMetadata.profiles || []), ...(fallbackMetadata.profiles || [])])),
-  capabilities: Array.from(
-    new Set([...(localMetadata.capabilities || []), ...(fallbackMetadata.capabilities || [])]),
-  ),
-};
+export const metadata = preferRust
+  ? localMetadata
+  : {
+      implementation: "tasknotes-tui",
+      version: localMetadata.version,
+      spec_version: localMetadata.spec_version,
+      validation_modes: Array.from(
+        new Set([...(localMetadata.validation_modes || []), ...(fallbackMetadata.validation_modes || [])]),
+      ),
+      profiles: Array.from(new Set([...(localMetadata.profiles || []), ...(fallbackMetadata.profiles || [])])),
+      capabilities: Array.from(
+        new Set([...(localMetadata.capabilities || []), ...(fallbackMetadata.capabilities || [])]),
+      ),
+    };
 
 export async function execute(operation, input) {
-  const preferRust = process.env.TASKNOTES_TUI_BRIDGE_MODE === "rust";
   if (!preferRust) {
     return fallbackExecute(operation, input);
   }
 
-  const local = await send(operation, input);
-  if (
-    local?.ok === false &&
-    typeof local.error === "string" &&
-    local.error.startsWith("unsupported_operation:")
-  ) {
-    return fallbackExecute(operation, input);
-  }
-  return local;
+  return send(operation, input);
 }

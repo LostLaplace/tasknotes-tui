@@ -2,12 +2,13 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuiConfig {
-    #[serde(default)]
-    pub keybinds: KeybindConfig,
+    #[serde(default = "default_keybinds")]
+    pub keybinds: BTreeMap<String, KeyCommand>,
     #[serde(default = "default_views")]
     pub views: BTreeMap<u8, ViewConfig>,
 }
@@ -37,95 +38,56 @@ pub enum ViewFilter {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KeybindConfig {
-    #[serde(default = "default_binding_command_palette")]
-    pub command_palette: String,
-    #[serde(default = "default_binding_quit")]
-    pub quit: String,
-    #[serde(default = "default_binding_next_task")]
-    pub next_task: String,
-    #[serde(default = "default_binding_prev_task")]
-    pub prev_task: String,
-    #[serde(default = "default_binding_refresh")]
-    pub refresh: String,
-    #[serde(default = "default_binding_search")]
-    pub search: String,
-    #[serde(default = "default_binding_create")]
-    pub create_task: String,
-    #[serde(default = "default_binding_toggle_complete")]
-    pub toggle_complete: String,
-    #[serde(default = "default_binding_toggle_time_tracking")]
-    pub toggle_time_tracking: String,
-    #[serde(default = "default_binding_toggle_skip")]
-    pub toggle_skip_recurring: String,
-    #[serde(default = "default_binding_toggle_archive")]
-    pub toggle_archive: String,
-    #[serde(default = "default_binding_edit_title")]
-    pub edit_title: String,
-    #[serde(default = "default_binding_open_in_editor")]
-    pub open_in_editor: String,
-    #[serde(default = "default_binding_edit_due")]
-    pub edit_due: String,
-    #[serde(default = "default_binding_edit_scheduled")]
-    pub edit_scheduled: String,
-    #[serde(default = "default_binding_edit_priority")]
-    pub edit_priority: String,
-    #[serde(default = "default_binding_edit_status")]
-    pub edit_status: String,
-    #[serde(default = "default_binding_edit_recurrence")]
-    pub edit_recurrence: String,
-    #[serde(default = "default_binding_edit_recurrence_anchor")]
-    pub edit_recurrence_anchor: String,
-    #[serde(default = "default_binding_focus_prev_day")]
-    pub focus_prev_day: String,
-    #[serde(default = "default_binding_focus_next_day")]
-    pub focus_next_day: String,
-    #[serde(default = "default_binding_focus_prev_week")]
-    pub focus_prev_week: String,
-    #[serde(default = "default_binding_focus_next_week")]
-    pub focus_next_week: String,
-    #[serde(default = "default_binding_focus_today")]
-    pub focus_today: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyCommand {
+    CommandPalette,
+    Quit,
+    NextTask,
+    PrevTask,
+    Refresh,
+    Search,
+    CreateTask,
+    QuickCreateTask,
+    ToggleComplete,
+    ToggleTimeTracking,
+    ToggleSkipRecurring,
+    ToggleArchive,
+    EditTitle,
+    OpenInEditor,
+    EditDue,
+    EditScheduled,
+    EditPriority,
+    EditStatus,
+    EditRecurrence,
+    EditRecurrenceAnchor,
+    FocusPrevDay,
+    FocusNextDay,
+    FocusPrevWeek,
+    FocusNextWeek,
+    FocusToday,
 }
 
 impl Default for TuiConfig {
     fn default() -> Self {
         Self {
-            keybinds: KeybindConfig::default(),
+            keybinds: default_keybinds(),
             views: default_views(),
         }
     }
 }
 
-impl Default for KeybindConfig {
-    fn default() -> Self {
-        Self {
-            command_palette: default_binding_command_palette(),
-            quit: default_binding_quit(),
-            next_task: default_binding_next_task(),
-            prev_task: default_binding_prev_task(),
-            refresh: default_binding_refresh(),
-            search: default_binding_search(),
-            create_task: default_binding_create(),
-            toggle_complete: default_binding_toggle_complete(),
-            toggle_time_tracking: default_binding_toggle_time_tracking(),
-            toggle_skip_recurring: default_binding_toggle_skip(),
-            toggle_archive: default_binding_toggle_archive(),
-            edit_title: default_binding_edit_title(),
-            open_in_editor: default_binding_open_in_editor(),
-            edit_due: default_binding_edit_due(),
-            edit_scheduled: default_binding_edit_scheduled(),
-            edit_priority: default_binding_edit_priority(),
-            edit_status: default_binding_edit_status(),
-            edit_recurrence: default_binding_edit_recurrence(),
-            edit_recurrence_anchor: default_binding_edit_recurrence_anchor(),
-            focus_prev_day: default_binding_focus_prev_day(),
-            focus_next_day: default_binding_focus_next_day(),
-            focus_prev_week: default_binding_focus_prev_week(),
-            focus_next_week: default_binding_focus_next_week(),
-            focus_today: default_binding_focus_today(),
-        }
+impl TuiConfig {
+    pub fn command_for_key(&self, key: KeyEvent) -> Option<KeyCommand> {
+        let normalized = normalize_key_event(key)?;
+        self.keybinds.get(&normalized).copied()
+    }
+
+    pub fn bindings_for_command(&self, command: KeyCommand) -> Vec<String> {
+        self.keybinds
+            .iter()
+            .filter_map(|(key, value)| (*value == command).then_some(key.clone()))
+            .collect()
     }
 }
 
@@ -189,77 +151,63 @@ pub fn default_views() -> BTreeMap<u8, ViewConfig> {
     ])
 }
 
-fn default_binding_command_palette() -> String {
-    "ctrl-p".into()
+pub fn default_keybinds() -> BTreeMap<String, KeyCommand> {
+    BTreeMap::from([
+        ("ctrl-p".into(), KeyCommand::CommandPalette),
+        ("q".into(), KeyCommand::Quit),
+        ("j".into(), KeyCommand::NextTask),
+        ("down".into(), KeyCommand::NextTask),
+        ("k".into(), KeyCommand::PrevTask),
+        ("up".into(), KeyCommand::PrevTask),
+        ("r".into(), KeyCommand::Refresh),
+        ("/".into(), KeyCommand::Search),
+        ("n".into(), KeyCommand::CreateTask),
+        ("c".into(), KeyCommand::QuickCreateTask),
+        ("x".into(), KeyCommand::ToggleComplete),
+        ("space".into(), KeyCommand::ToggleComplete),
+        ("shift-t".into(), KeyCommand::ToggleTimeTracking),
+        ("shift-s".into(), KeyCommand::ToggleSkipRecurring),
+        ("z".into(), KeyCommand::ToggleArchive),
+        ("e".into(), KeyCommand::EditTitle),
+        ("i".into(), KeyCommand::OpenInEditor),
+        ("d".into(), KeyCommand::EditDue),
+        ("s".into(), KeyCommand::EditScheduled),
+        ("p".into(), KeyCommand::EditPriority),
+        ("t".into(), KeyCommand::EditStatus),
+        ("shift-r".into(), KeyCommand::EditRecurrence),
+        ("shift-a".into(), KeyCommand::EditRecurrenceAnchor),
+        ("h".into(), KeyCommand::FocusPrevDay),
+        ("left".into(), KeyCommand::FocusPrevDay),
+        ("l".into(), KeyCommand::FocusNextDay),
+        ("right".into(), KeyCommand::FocusNextDay),
+        ("pageup".into(), KeyCommand::FocusPrevWeek),
+        ("pagedown".into(), KeyCommand::FocusNextWeek),
+        ("g".into(), KeyCommand::FocusToday),
+    ])
 }
-fn default_binding_quit() -> String {
-    "q".into()
-}
-fn default_binding_next_task() -> String {
-    "j".into()
-}
-fn default_binding_prev_task() -> String {
-    "k".into()
-}
-fn default_binding_refresh() -> String {
-    "r".into()
-}
-fn default_binding_search() -> String {
-    "/".into()
-}
-fn default_binding_create() -> String {
-    "n".into()
-}
-fn default_binding_toggle_complete() -> String {
-    "x".into()
-}
-fn default_binding_toggle_time_tracking() -> String {
-    "shift-t".into()
-}
-fn default_binding_toggle_skip() -> String {
-    "shift-s".into()
-}
-fn default_binding_toggle_archive() -> String {
-    "z".into()
-}
-fn default_binding_edit_title() -> String {
-    "e".into()
-}
-fn default_binding_open_in_editor() -> String {
-    "i".into()
-}
-fn default_binding_edit_due() -> String {
-    "d".into()
-}
-fn default_binding_edit_scheduled() -> String {
-    "s".into()
-}
-fn default_binding_edit_priority() -> String {
-    "p".into()
-}
-fn default_binding_edit_status() -> String {
-    "t".into()
-}
-fn default_binding_edit_recurrence() -> String {
-    "shift-r".into()
-}
-fn default_binding_edit_recurrence_anchor() -> String {
-    "shift-a".into()
-}
-fn default_binding_focus_prev_day() -> String {
-    "left".into()
-}
-fn default_binding_focus_next_day() -> String {
-    "right".into()
-}
-fn default_binding_focus_prev_week() -> String {
-    "pageup".into()
-}
-fn default_binding_focus_next_week() -> String {
-    "pagedown".into()
-}
-fn default_binding_focus_today() -> String {
-    "g".into()
+
+fn normalize_key_event(key: KeyEvent) -> Option<String> {
+    match key.code {
+        KeyCode::Enter => Some("enter".into()),
+        KeyCode::Esc => Some("esc".into()),
+        KeyCode::Left => Some("left".into()),
+        KeyCode::Right => Some("right".into()),
+        KeyCode::Up => Some("up".into()),
+        KeyCode::Down => Some("down".into()),
+        KeyCode::PageUp => Some("pageup".into()),
+        KeyCode::PageDown => Some("pagedown".into()),
+        KeyCode::Char(' ') => Some("space".into()),
+        KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(format!("ctrl-{}", ch.to_ascii_lowercase()))
+        }
+        KeyCode::Char(ch)
+            if key.modifiers.contains(KeyModifiers::SHIFT) && ch.is_ascii_alphabetic() =>
+        {
+            Some(format!("shift-{}", ch.to_ascii_lowercase()))
+        }
+        KeyCode::Char(ch) => Some(ch.to_ascii_lowercase().to_string()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -271,7 +219,9 @@ mod tests {
         let config: TuiConfig = serde_yaml::from_str(
             r#"
 keybinds:
-  create_task: "a"
+  a: create_task
+  left: focus_prev_day
+  h: focus_prev_day
 views:
   1:
     label: "Inbox"
@@ -288,7 +238,11 @@ views:
         )
         .unwrap();
 
-        assert_eq!(config.keybinds.create_task, "a");
+        assert_eq!(config.keybinds.get("a"), Some(&KeyCommand::CreateTask));
+        assert_eq!(
+            config.bindings_for_command(KeyCommand::FocusPrevDay),
+            vec!["h".to_string(), "left".to_string()]
+        );
         assert_eq!(config.views.get(&1).unwrap().label, "Inbox");
         match &config.views.get(&2).unwrap().filter {
             ViewFilter::Status { value } => assert_eq!(value, "doing"),
@@ -307,7 +261,14 @@ views:
         let yaml = default_config_yaml();
         let config: TuiConfig = serde_yaml::from_str(&yaml).unwrap();
 
-        assert_eq!(config.keybinds.command_palette, "ctrl-p");
+        assert_eq!(
+            config.keybinds.get("ctrl-p"),
+            Some(&KeyCommand::CommandPalette)
+        );
+        assert_eq!(
+            config.bindings_for_command(KeyCommand::FocusPrevDay),
+            vec!["h".to_string(), "left".to_string()]
+        );
         assert_eq!(config.views.get(&1).unwrap().label, "Open");
         assert!(config.views.contains_key(&6));
     }

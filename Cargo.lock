@@ -644,6 +644,7 @@ dependencies = [
 [[package]]
 name = "mdbase"
 version = "0.1.0"
+source = "git+https://github.com/callumalpass/mdbase-rs.git?rev=4fa54c44c7c20639a8998f612dacdb4848ce5bfa#4fa54c44c7c20639a8998f612dacdb4848ce5bfa"
 dependencies = [
  "chrono",
  "clap",

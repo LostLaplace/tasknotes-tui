@@ -10,15 +10,13 @@ A fast terminal UI for TaskNotes-style markdown tasks, built in Rust on top of `
 - `src/spec_ops.rs`: TaskNotes-spec bridge surface
 - `js/tasknotes-spec-adapter.mjs`: JS adapter for the TaskNotes-spec runner
 
-The interactive TUI uses `mdbase-rs` for collection reads and writes. The repo also includes two conformance paths:
+The interactive TUI uses `mdbase-rs` for collection reads and writes. The repo also includes three conformance paths:
 
-- `npm run conformance:test`: runs the TaskNotes-spec suite against this repo's adapter, with fallback enabled for unsupported bridge operations
-- `npm run conformance:test:rust`: runs the same suite preferring the local Rust bridge first
+- `npm run conformance:test`: runs the TaskNotes-spec suite against this repo's adapter
+- `npm run conformance:test:rust`: runs the same suite through the local Rust bridge
 - `npm run conformance:test:reference`: runs the suite against the sibling `mdbase-tasknotes` reference implementation
 
-The Rust bridge path is intentionally narrower today. It exists so the Rust core can be pushed toward spec parity incrementally without blocking the TUI itself.
-
-`mdbase-tasknotes` is not part of the TUI runtime. It is only used in the conformance harness today as a sibling reference/fallback implementation while the local Rust bridge continues moving toward full parity.
+`mdbase-tasknotes` is not part of the TUI runtime. It is only used in the conformance harness as a sibling reference implementation.
 
 ## Run
 
@@ -54,7 +52,7 @@ GitHub Releases can also ship prebuilt archives for:
 
 A release workflow is included at [`.github/workflows/release.yml`](/home/calluma/projects/tasknotes-tui/.github/workflows/release.yml). Tagging a release like `v0.1.0` will build platform archives and attach them to the GitHub Release.
 
-The runtime also honors the vault-root `tasknotes.yaml` TaskNotes-spec config for behavior such as field mapping, defaults, archive semantics, and related task behavior. Task membership itself comes from the `mdbase` type definition, not from `tasknotes.yaml`.
+The runtime reads the vault-root `tasknotes.yaml` TaskNotes-spec config for field mapping, defaults, archive behavior, and related task behavior. Task membership comes from the `mdbase` type definition.
 
 ## Keys
 
@@ -75,6 +73,7 @@ The runtime also honors the vault-root `tasknotes.yaml` TaskNotes-spec config fo
 - `T`: start/stop time tracking on the selected task
 - `S`: skip/unskip today's recurring instance
 - `n`: create task
+- `c`: quick create for the focused date
 - `e`: edit title
 - `i`: open selected task in `$EDITOR`
 - `d`: edit due date
@@ -90,7 +89,7 @@ The runtime also honors the vault-root `tasknotes.yaml` TaskNotes-spec config fo
 
 `Ctrl-P` opens a modal command panel with fuzzy filtering, keyboard navigation, and inline help. It exposes configured view slots from `tasknotes-tui.yaml` alongside editing actions, creation, refresh, completion toggling, archive toggling, and recurring skip actions.
 
-Archive follows TaskNotes-spec-compatible semantics in this TUI by marking tasks with the `archived` tag and `archived: true`, while optionally moving files to the configured archive folder.
+Archiving marks tasks with the configured archive tag and field, and can also move files into the configured archive folder.
 
 Archive semantics are configurable in `tasknotes.yaml`:
 
@@ -104,15 +103,11 @@ archive:
 
 `tag` and `field` control what the TUI writes and what it considers archived in views and filtering.
 
-Archive and restore now update the in-memory task cache immediately instead of forcing a full vault reload, so those actions stay fast even in larger vaults. Use `r` when you want a full disk refresh.
+Task membership is defined by the `mdbase` task type. Files outside that type are not shown as tasks.
 
-What counts as a task in the TUI is defined by the `mdbase` task type. If a file is not classified by `mdbase` as a `task`, the runtime will not surface it as a task even if its frontmatter looks task-like.
-
-Task body editing is intentionally delegated to your external editor rather than being done inline in the TUI.
+Task body editing uses your external editor.
 
 ## Time Tracking
-
-Time tracking is now supported as a task action and on the TaskNotes-spec bridge surface.
 
 - `T`: toggle tracking for the selected task
 - `5`: show tasks with an active timer
@@ -133,10 +128,15 @@ Example:
 
 ```yaml
 keybinds:
-  command_palette: "ctrl-p"
-  create_task: "a"
-  open_in_editor: "enter"
-  toggle_time_tracking: "shift-t"
+  ctrl-p: command_palette
+  n: create_task
+  c: quick_create_task
+  i: open_in_editor
+  shift-t: toggle_time_tracking
+  h: focus_prev_day
+  left: focus_prev_day
+  l: focus_next_day
+  right: focus_next_day
 
 views:
   1:
@@ -162,6 +162,8 @@ views:
     label: "All"
     kind: "all"
 ```
+
+The keybind table is `key -> command`. Multiple keys can point at the same command.
 
 Supported view kinds:
 
@@ -202,13 +204,13 @@ Available expression context includes normal normalized task fields like `status
 
 ## Calendar
 
-The right pane now includes a mini monthly calendar. The highlighted day is the current focused date, and dates with tasks are marked with `*`.
+The right pane includes a mini monthly calendar. The highlighted day is the focused date, and dates with tasks are marked with `*`.
 
-When the date filter is active with `2`, the task list shows tasks for the focused date rather than only literal today. Use `h`/`l`, left/right, `PgUp`/`PgDn`, or `g` to move around the calendar.
+When the date view is active with `2`, the task list shows tasks for the focused date. Use `h`/`l`, left/right, `PgUp`/`PgDn`, or `g` to move around the calendar.
 
 ## Date Editing
 
-Due and scheduled edits now open a date picker instead of defaulting to raw text entry.
+Due and scheduled dates are edited through a date picker.
 
 - arrows or `h`/`l`: move by day
 - `j`/`k`: move by week
@@ -232,3 +234,14 @@ Due and scheduled edits now open a date picker instead of defaulting to raw text
 - recurrence anchor
 
 Blank values skip optional fields.
+
+## Quick Create
+
+`c` opens a title-only quick create prompt.
+
+- title comes from the prompt
+- `scheduled` is set to the currently focused date
+- status and priority use vault defaults
+- details/body stays empty
+
+Quick create is the fast capture path for calendar-driven planning.

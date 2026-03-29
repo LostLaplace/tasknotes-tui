@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 
 use crate::date::{apply_day_offset, apply_month_offset, get_date_part, today_local};
 use crate::repository::{TaskDraft, TaskFilter, TaskRecord, TaskRepository};
-use crate::tui_config::{TuiConfig, ViewConfig, ViewFilter};
+use crate::tui_config::{KeyCommand, TuiConfig, ViewConfig, ViewFilter};
 use crate::view_query::{compile_view_filters, CompiledViewFilter, ViewEvalSupport};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,12 +19,14 @@ pub enum InputMode {
     TextCreateScheduled,
     TextEditDue,
     TextEditScheduled,
+    QuickCreateTitle,
     CreateTitle,
     CreateDetails,
     CreatePriority,
     CreateStatus,
     CreateRecurrence,
     CreateRecurrenceAnchor,
+    ConfirmDelete,
     EditTitle,
     EditPriority,
     EditStatus,
@@ -57,8 +59,10 @@ pub struct App {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteCommand {
     CreateTask,
+    QuickCreateTask,
     Search,
     Refresh,
+    DeleteTask,
     ToggleComplete,
     ToggleArchive,
     ToggleTimeTracking,
@@ -92,6 +96,13 @@ fn static_palette_items() -> Vec<PaletteItem> {
             hotkey: None,
         },
         PaletteItem {
+            command: PaletteCommand::QuickCreateTask,
+            title: "Quick create".into(),
+            aliases: vec!["quick".into(), "capture".into(), "c".into()],
+            description: "Create a task for the focused date from a title only".into(),
+            hotkey: None,
+        },
+        PaletteItem {
             command: PaletteCommand::Search,
             title: "Search tasks".into(),
             aliases: vec!["find".into(), "/".into()],
@@ -103,6 +114,13 @@ fn static_palette_items() -> Vec<PaletteItem> {
             title: "Refresh list".into(),
             aliases: vec!["reload".into(), "r".into()],
             description: "Reload tasks from disk".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::DeleteTask,
+            title: "Delete task".into(),
+            aliases: vec!["delete".into(), "remove".into(), "trash".into()],
+            description: "Delete the selected task after confirmation".into(),
             hotkey: None,
         },
         PaletteItem {
@@ -387,6 +405,14 @@ impl App {
         self.status = "Search tasks".to_string();
     }
 
+    pub fn begin_delete(&mut self) {
+        if let Some(title) = self.selected_task().map(|task| task.title.clone()) {
+            self.input_mode = InputMode::ConfirmDelete;
+            self.input_value.clear();
+            self.status = format!("Delete {}: Enter confirms, Esc cancels", title);
+        }
+    }
+
     fn replace_cached_task(&mut self, old_path: &str, updated: TaskRecord) {
         let updated_path = updated.path.clone();
         if let Some(existing) = self.all_tasks.iter_mut().find(|task| task.path == old_path) {
@@ -409,6 +435,12 @@ impl App {
         if let Some(index) = self.tasks.iter().position(|entry| entry.path == task_path) {
             self.selected = index;
         }
+    }
+
+    fn remove_cached_task(&mut self, path: &str) {
+        self.all_tasks.retain(|task| task.path != path);
+        self.calendar_tasks = self.all_tasks.clone();
+        self.apply_filters();
     }
 
     pub fn refresh_selected_task(&mut self) -> Result<()> {
@@ -436,6 +468,12 @@ impl App {
         self.input_mode = InputMode::CreateTitle;
         self.input_value.clear();
         self.status = "New task: enter title".to_string();
+    }
+
+    pub fn begin_quick_create(&mut self) {
+        self.input_mode = InputMode::QuickCreateTitle;
+        self.input_value.clear();
+        self.status = format!("Quick create for {}: enter title", self.focus_date);
     }
 
     pub fn begin_edit_title(&mut self) {
@@ -598,7 +636,8 @@ impl App {
             InputMode::PickEditDue => {
                 if let Some(task) = self.selected_task().cloned() {
                     let value = self.current_picker_value();
-                    let updated = self.repo
+                    let updated = self
+                        .repo
                         .update_date_field(&task, "due", value.as_deref())?;
                     self.replace_cached_task(&task.path, updated);
                     self.input_mode = InputMode::None;
@@ -609,8 +648,9 @@ impl App {
             InputMode::PickEditScheduled => {
                 if let Some(task) = self.selected_task().cloned() {
                     let value = self.current_picker_value();
-                    let updated = self.repo
-                        .update_date_field(&task, "scheduled", value.as_deref())?;
+                    let updated =
+                        self.repo
+                            .update_date_field(&task, "scheduled", value.as_deref())?;
                     self.replace_cached_task(&task.path, updated);
                     self.input_mode = InputMode::None;
                     self.input_value.clear();
@@ -634,7 +674,8 @@ impl App {
             InputMode::TextEditDue => {
                 if let Some(task) = self.selected_task().cloned() {
                     let value = option_from_input(&self.input_value);
-                    let updated = self.repo
+                    let updated = self
+                        .repo
                         .update_date_field(&task, "due", value.as_deref())?;
                     self.replace_cached_task(&task.path, updated);
                     self.input_mode = InputMode::None;
@@ -645,12 +686,34 @@ impl App {
             InputMode::TextEditScheduled => {
                 if let Some(task) = self.selected_task().cloned() {
                     let value = option_from_input(&self.input_value);
-                    let updated = self.repo
-                        .update_date_field(&task, "scheduled", value.as_deref())?;
+                    let updated =
+                        self.repo
+                            .update_date_field(&task, "scheduled", value.as_deref())?;
                     self.replace_cached_task(&task.path, updated);
                     self.input_mode = InputMode::None;
                     self.input_value.clear();
                     self.status = format!("Updated scheduled date for {}", task.title);
+                }
+            }
+            InputMode::QuickCreateTitle => {
+                let title = self.input_value.trim().to_string();
+                if title.is_empty() {
+                    self.status = "Title must not be empty".to_string();
+                } else {
+                    let created = self.repo.create_task_from_draft(&TaskDraft {
+                        title: title.clone(),
+                        details: String::new(),
+                        due: None,
+                        scheduled: Some(self.focus_date.clone()),
+                        priority: None,
+                        status: None,
+                        recurrence: None,
+                        recurrence_anchor: None,
+                    })?;
+                    self.input_mode = InputMode::None;
+                    self.input_value.clear();
+                    self.append_cached_task(created);
+                    self.status = format!("Quick created {} for {}", title, self.focus_date);
                 }
             }
             InputMode::CreateTitle => {
@@ -710,6 +773,15 @@ impl App {
                 self.append_cached_task(created);
                 self.status = format!("Created {}", title);
             }
+            InputMode::ConfirmDelete => {
+                if let Some(task) = self.selected_task().cloned() {
+                    self.repo.delete_task(&task)?;
+                    self.input_mode = InputMode::None;
+                    self.input_value.clear();
+                    self.remove_cached_task(&task.path);
+                    self.status = format!("Deleted {}", task.title);
+                }
+            }
             InputMode::EditTitle => {
                 if let Some(task) = self.selected_task().cloned() {
                     let title = self.input_value.trim().to_string();
@@ -723,8 +795,9 @@ impl App {
             InputMode::EditPriority => {
                 if let Some(task) = self.selected_task().cloned() {
                     let value = option_from_input(&self.input_value);
-                    let updated = self.repo
-                        .update_scalar_field(&task, "priority", value.as_deref())?;
+                    let updated =
+                        self.repo
+                            .update_scalar_field(&task, "priority", value.as_deref())?;
                     self.replace_cached_task(&task.path, updated);
                     self.input_mode = InputMode::None;
                     self.input_value.clear();
@@ -734,8 +807,9 @@ impl App {
             InputMode::EditStatus => {
                 if let Some(task) = self.selected_task().cloned() {
                     let value = option_from_input(&self.input_value);
-                    let updated = self.repo
-                        .update_scalar_field(&task, "status", value.as_deref())?;
+                    let updated =
+                        self.repo
+                            .update_scalar_field(&task, "status", value.as_deref())?;
                     self.replace_cached_task(&task.path, updated);
                     self.input_mode = InputMode::None;
                     self.input_value.clear();
@@ -745,10 +819,12 @@ impl App {
             InputMode::EditRecurrence => {
                 if let Some(task) = self.selected_task().cloned() {
                     let value = option_from_input(&self.input_value);
-                    let mut updated = self.repo
-                        .update_scalar_field(&task, "recurrence", value.as_deref())?;
+                    let mut updated =
+                        self.repo
+                            .update_scalar_field(&task, "recurrence", value.as_deref())?;
                     if value.is_none() {
-                        updated = self.repo
+                        updated = self
+                            .repo
                             .update_scalar_field(&task, "recurrenceAnchor", None)?;
                     }
                     self.replace_cached_task(&task.path, updated);
@@ -760,8 +836,11 @@ impl App {
             InputMode::EditRecurrenceAnchor => {
                 if let Some(task) = self.selected_task().cloned() {
                     let value = option_from_input(&self.input_value);
-                    let updated = self.repo
-                        .update_scalar_field(&task, "recurrenceAnchor", value.as_deref())?;
+                    let updated = self.repo.update_scalar_field(
+                        &task,
+                        "recurrenceAnchor",
+                        value.as_deref(),
+                    )?;
                     self.replace_cached_task(&task.path, updated);
                     self.input_mode = InputMode::None;
                     self.input_value.clear();
@@ -785,18 +864,133 @@ impl App {
             InputMode::TextCreateScheduled => "Type scheduled date",
             InputMode::TextEditDue => "Type due date",
             InputMode::TextEditScheduled => "Type scheduled date",
+            InputMode::QuickCreateTitle => "Quick create",
             InputMode::CreateTitle => "New title",
             InputMode::CreateDetails => "New details",
             InputMode::CreatePriority => "New priority",
             InputMode::CreateStatus => "New status",
             InputMode::CreateRecurrence => "New recurrence",
             InputMode::CreateRecurrenceAnchor => "New recurrence anchor",
+            InputMode::ConfirmDelete => "Confirm delete",
             InputMode::EditTitle => "Edit title",
             InputMode::EditPriority => "Edit priority",
             InputMode::EditStatus => "Edit status",
             InputMode::EditRecurrence => "Edit recurrence",
             InputMode::EditRecurrenceAnchor => "Edit recurrence anchor",
         })
+    }
+
+    pub fn mode_label(&self) -> String {
+        if let Some((step, total, label)) = self.create_progress() {
+            return format!("Create {step}/{total}: {label}");
+        }
+        match self.input_mode {
+            InputMode::None => "Browse".to_string(),
+            InputMode::CommandPalette => "Command Palette".to_string(),
+            InputMode::Search => "Search".to_string(),
+            InputMode::PickCreateDue | InputMode::PickEditDue => "Date Picker: Due".to_string(),
+            InputMode::PickCreateScheduled | InputMode::PickEditScheduled => {
+                "Date Picker: Scheduled".to_string()
+            }
+            InputMode::TextCreateDue | InputMode::TextEditDue => "Type Due Date".to_string(),
+            InputMode::TextCreateScheduled | InputMode::TextEditScheduled => {
+                "Type Scheduled Date".to_string()
+            }
+            InputMode::QuickCreateTitle => "Quick Create".to_string(),
+            InputMode::ConfirmDelete => "Confirm Delete".to_string(),
+            InputMode::EditTitle => "Edit Title".to_string(),
+            InputMode::EditPriority => "Edit Priority".to_string(),
+            InputMode::EditStatus => "Edit Status".to_string(),
+            InputMode::EditRecurrence => "Edit Recurrence".to_string(),
+            InputMode::EditRecurrenceAnchor => "Edit Recurrence Anchor".to_string(),
+            InputMode::CreateTitle
+            | InputMode::CreateDetails
+            | InputMode::CreatePriority
+            | InputMode::CreateStatus
+            | InputMode::CreateRecurrence
+            | InputMode::CreateRecurrenceAnchor => "Create".to_string(),
+        }
+    }
+
+    pub fn create_progress(&self) -> Option<(usize, usize, &'static str)> {
+        let progress = match self.input_mode {
+            InputMode::CreateTitle => (1, 7, "Title"),
+            InputMode::CreateDetails => (2, 7, "Details"),
+            InputMode::PickCreateDue | InputMode::TextCreateDue => (3, 7, "Due"),
+            InputMode::PickCreateScheduled | InputMode::TextCreateScheduled => (4, 7, "Scheduled"),
+            InputMode::CreatePriority => (5, 7, "Priority"),
+            InputMode::CreateStatus => (6, 7, "Status"),
+            InputMode::CreateRecurrence => (7, 7, "Recurrence"),
+            InputMode::CreateRecurrenceAnchor => (7, 7, "Anchor"),
+            _ => return None,
+        };
+        Some(progress)
+    }
+
+    pub fn selected_position_label(&self) -> String {
+        if self.tasks.is_empty() {
+            "0/0".to_string()
+        } else {
+            format!("{}/{}", self.selected + 1, self.tasks.len())
+        }
+    }
+
+    pub fn contextual_shortcuts(&self) -> Vec<(String, String)> {
+        match self.input_mode {
+            InputMode::None => vec![
+                (
+                    "Move".to_string(),
+                    self.binding_label(KeyCommand::NextTask, "j/k"),
+                ),
+                ("Views".to_string(), "1-9 switch".to_string()),
+                (
+                    "Date".to_string(),
+                    self.binding_label(KeyCommand::FocusToday, "h/l, pgup/pgdn, g"),
+                ),
+                (
+                    "Actions".to_string(),
+                    format!(
+                        "{} complete, {} archive, {} palette",
+                        self.binding_label(KeyCommand::ToggleComplete, "x"),
+                        self.binding_label(KeyCommand::ToggleArchive, "z"),
+                        self.binding_label(KeyCommand::CommandPalette, "ctrl-p"),
+                    ),
+                ),
+            ],
+            InputMode::CommandPalette => vec![
+                ("Move".to_string(), "up/down".to_string()),
+                ("Apply".to_string(), "enter".to_string()),
+                ("Cancel".to_string(), "esc".to_string()),
+            ],
+            InputMode::Search => vec![
+                ("Apply".to_string(), "enter".to_string()),
+                ("Cancel".to_string(), "esc".to_string()),
+                (
+                    "Scope".to_string(),
+                    "title, body, path, priority".to_string(),
+                ),
+            ],
+            InputMode::PickCreateDue
+            | InputMode::PickCreateScheduled
+            | InputMode::PickEditDue
+            | InputMode::PickEditScheduled => vec![
+                ("Move".to_string(), "arrows or hjkl".to_string()),
+                ("Month".to_string(), "H/L".to_string()),
+                ("Other".to_string(), "t today, c clear, / type".to_string()),
+            ],
+            InputMode::TextCreateDue
+            | InputMode::TextCreateScheduled
+            | InputMode::TextEditDue
+            | InputMode::TextEditScheduled => vec![
+                ("Format".to_string(), "YYYY-MM-DD".to_string()),
+                ("Clear".to_string(), "blank".to_string()),
+                ("Cancel".to_string(), "esc".to_string()),
+            ],
+            _ => vec![
+                ("Submit".to_string(), "enter".to_string()),
+                ("Cancel".to_string(), "esc".to_string()),
+            ],
+        }
     }
 
     pub fn is_input_active(&self) -> bool {
@@ -886,11 +1080,13 @@ impl App {
     fn run_palette_command(&mut self, command: PaletteCommand) -> Result<()> {
         match command {
             PaletteCommand::CreateTask => self.begin_create(),
+            PaletteCommand::QuickCreateTask => self.begin_quick_create(),
             PaletteCommand::Search => self.begin_search(),
             PaletteCommand::Refresh => {
                 self.reload_from_disk()?;
                 self.status = "Refreshed task list".to_string();
             }
+            PaletteCommand::DeleteTask => self.begin_delete(),
             PaletteCommand::ToggleComplete => self.toggle_selected()?,
             PaletteCommand::ToggleArchive => self.toggle_selected_archive()?,
             PaletteCommand::ToggleTimeTracking => self.toggle_selected_time_tracking()?,
@@ -997,30 +1193,36 @@ impl App {
     }
 
     fn command_hotkey(&self, command: PaletteCommand) -> Option<String> {
-        let keys = &self.tui_config.keybinds;
-        let value = match command {
-            PaletteCommand::CreateTask => &keys.create_task,
-            PaletteCommand::Search => &keys.search,
-            PaletteCommand::Refresh => &keys.refresh,
-            PaletteCommand::ToggleComplete => &keys.toggle_complete,
-            PaletteCommand::ToggleArchive => &keys.toggle_archive,
-            PaletteCommand::ToggleTimeTracking => &keys.toggle_time_tracking,
-            PaletteCommand::ToggleRecurringSkip => &keys.toggle_skip_recurring,
+        let key_command = match command {
+            PaletteCommand::CreateTask => KeyCommand::CreateTask,
+            PaletteCommand::QuickCreateTask => KeyCommand::QuickCreateTask,
+            PaletteCommand::Search => KeyCommand::Search,
+            PaletteCommand::Refresh => KeyCommand::Refresh,
+            PaletteCommand::ToggleComplete => KeyCommand::ToggleComplete,
+            PaletteCommand::ToggleArchive => KeyCommand::ToggleArchive,
+            PaletteCommand::ToggleTimeTracking => KeyCommand::ToggleTimeTracking,
+            PaletteCommand::ToggleRecurringSkip => KeyCommand::ToggleSkipRecurring,
+            PaletteCommand::DeleteTask => return None,
             PaletteCommand::ViewSlot(_) => return None,
-            PaletteCommand::EditTitle => &keys.edit_title,
-            PaletteCommand::OpenInEditor => &keys.open_in_editor,
-            PaletteCommand::EditDue => &keys.edit_due,
-            PaletteCommand::EditScheduled => &keys.edit_scheduled,
-            PaletteCommand::EditPriority => &keys.edit_priority,
-            PaletteCommand::EditStatus => &keys.edit_status,
-            PaletteCommand::EditRecurrence => &keys.edit_recurrence,
-            PaletteCommand::EditRecurrenceAnchor => &keys.edit_recurrence_anchor,
+            PaletteCommand::EditTitle => KeyCommand::EditTitle,
+            PaletteCommand::OpenInEditor => KeyCommand::OpenInEditor,
+            PaletteCommand::EditDue => KeyCommand::EditDue,
+            PaletteCommand::EditScheduled => KeyCommand::EditScheduled,
+            PaletteCommand::EditPriority => KeyCommand::EditPriority,
+            PaletteCommand::EditStatus => KeyCommand::EditStatus,
+            PaletteCommand::EditRecurrence => KeyCommand::EditRecurrence,
+            PaletteCommand::EditRecurrenceAnchor => KeyCommand::EditRecurrenceAnchor,
         };
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
+        let bindings = self.tui_config.bindings_for_command(key_command);
+        (!bindings.is_empty()).then(|| bindings.join(", "))
+    }
+
+    fn binding_label(&self, command: KeyCommand, fallback: &str) -> String {
+        let bindings = self.tui_config.bindings_for_command(command);
+        if bindings.is_empty() {
+            fallback.to_string()
         } else {
-            Some(trimmed.to_string())
+            bindings.join(", ")
         }
     }
 }

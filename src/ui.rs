@@ -20,6 +20,7 @@ use ratatui::{
 use crate::app::App;
 use crate::date::{get_date_part, today_local};
 use crate::repository::is_archived_task;
+use crate::tui_config::KeyCommand;
 
 pub fn run(mut app: App) -> Result<()> {
     enable_raw_mode()?;
@@ -83,57 +84,36 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         return Ok(false);
     }
 
-    let keys = &app.tui_config.keybinds;
-    if binding_matches(key, &keys.quit) {
-        return Ok(true);
-    } else if binding_matches(key, &keys.focus_prev_day) {
-        app.move_focus_date(-1)?;
-    } else if binding_matches(key, &keys.focus_next_day) {
-        app.move_focus_date(1)?;
-    } else if binding_matches(key, &keys.focus_prev_week) {
-        app.move_focus_date(-7)?;
-    } else if binding_matches(key, &keys.focus_next_week) {
-        app.move_focus_date(7)?;
-    } else if binding_matches(key, &keys.focus_today) {
-        app.reset_focus_date()?;
-    } else if binding_matches(key, &keys.next_task) {
-        app.next();
-    } else if binding_matches(key, &keys.prev_task) {
-        app.previous();
-    } else if binding_matches(key, &keys.refresh) {
-        app.refresh()?;
-    } else if binding_matches(key, &keys.toggle_complete) {
-        app.toggle_selected()?;
-    } else if binding_matches(key, &keys.toggle_archive) {
-        app.toggle_selected_archive()?;
-    } else if binding_matches(key, &keys.toggle_skip_recurring) {
-        app.skip_selected_today()?;
-    } else if let Some(slot) = numeric_view_slot(key) {
+    if let Some(slot) = numeric_view_slot(key) {
         app.activate_view_slot(slot)?;
-    } else if binding_matches(key, &keys.create_task) {
-        app.begin_create();
-    } else if binding_matches(key, &keys.search) {
-        app.begin_search();
-    } else if binding_matches(key, &keys.command_palette) {
-        app.begin_command_palette();
-    } else if binding_matches(key, &keys.edit_title) {
-        app.begin_edit_title();
-    } else if binding_matches(key, &keys.open_in_editor) {
-        app.request_open_in_editor();
-    } else if binding_matches(key, &keys.edit_due) {
-        app.begin_edit_due();
-    } else if binding_matches(key, &keys.edit_scheduled) {
-        app.begin_edit_scheduled();
-    } else if binding_matches(key, &keys.toggle_time_tracking) {
-        app.toggle_selected_time_tracking()?;
-    } else if binding_matches(key, &keys.edit_priority) {
-        app.begin_edit_priority();
-    } else if binding_matches(key, &keys.edit_status) {
-        app.begin_edit_status();
-    } else if binding_matches(key, &keys.edit_recurrence) {
-        app.begin_edit_recurrence();
-    } else if binding_matches(key, &keys.edit_recurrence_anchor) {
-        app.begin_edit_recurrence_anchor();
+    } else if let Some(command) = app.tui_config.command_for_key(key) {
+        match command {
+            KeyCommand::Quit => return Ok(true),
+            KeyCommand::FocusPrevDay => app.move_focus_date(-1)?,
+            KeyCommand::FocusNextDay => app.move_focus_date(1)?,
+            KeyCommand::FocusPrevWeek => app.move_focus_date(-7)?,
+            KeyCommand::FocusNextWeek => app.move_focus_date(7)?,
+            KeyCommand::FocusToday => app.reset_focus_date()?,
+            KeyCommand::NextTask => app.next(),
+            KeyCommand::PrevTask => app.previous(),
+            KeyCommand::Refresh => app.refresh()?,
+            KeyCommand::ToggleComplete => app.toggle_selected()?,
+            KeyCommand::ToggleArchive => app.toggle_selected_archive()?,
+            KeyCommand::ToggleSkipRecurring => app.skip_selected_today()?,
+            KeyCommand::CreateTask => app.begin_create(),
+            KeyCommand::QuickCreateTask => app.begin_quick_create(),
+            KeyCommand::Search => app.begin_search(),
+            KeyCommand::CommandPalette => app.begin_command_palette(),
+            KeyCommand::EditTitle => app.begin_edit_title(),
+            KeyCommand::OpenInEditor => app.request_open_in_editor(),
+            KeyCommand::EditDue => app.begin_edit_due(),
+            KeyCommand::EditScheduled => app.begin_edit_scheduled(),
+            KeyCommand::ToggleTimeTracking => app.toggle_selected_time_tracking()?,
+            KeyCommand::EditPriority => app.begin_edit_priority(),
+            KeyCommand::EditStatus => app.begin_edit_status(),
+            KeyCommand::EditRecurrence => app.begin_edit_recurrence(),
+            KeyCommand::EditRecurrenceAnchor => app.begin_edit_recurrence_anchor(),
+        }
     }
     Ok(false)
 }
@@ -144,113 +124,122 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         .direction(Direction::Vertical)
         .constraints(if has_input {
             vec![
-                Constraint::Length(3),
+                Constraint::Length(4),
                 Constraint::Min(10),
-                Constraint::Length(3),
-                Constraint::Length(2),
+                Constraint::Length(4),
+                Constraint::Length(4),
             ]
         } else {
             vec![
-                Constraint::Length(3),
+                Constraint::Length(4),
                 Constraint::Min(10),
-                Constraint::Length(2),
+                Constraint::Length(4),
             ]
         })
         .split(frame.area());
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
         .split(layout[1]);
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(10), Constraint::Min(10)])
         .split(body[1]);
 
-    let title = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "TaskNotes TUI",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!(
-                "View {}: {}",
-                app.current_view_slot,
-                app.current_view()
-                    .map(|view| view.label.as_str())
-                    .unwrap_or("Unknown")
+    let title = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(
+                "TaskNotes TUI",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!("Date: {}", app.focus_date),
-            Style::default().fg(Color::Magenta),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!(
-                "Search: {}",
-                if app.search_query.is_empty() {
-                    "off"
-                } else {
-                    app.search_query.as_str()
-                }
+            Span::raw("  "),
+            Span::styled(app.mode_label(), Style::default().fg(Color::Green)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                format!(
+                    "View {}: {}",
+                    app.current_view_slot,
+                    app.current_view()
+                        .map(|view| view.label.as_str())
+                        .unwrap_or("Unknown")
+                ),
+                Style::default().fg(Color::Cyan),
             ),
-            Style::default().fg(Color::Green),
-        ),
-    ]))
-    .block(Block::default().borders(Borders::ALL));
+            Span::raw("  "),
+            Span::styled(
+                format!("Focus {}", app.focus_date),
+                Style::default().fg(Color::Magenta),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                format!("Selection {}", app.selected_position_label()),
+                Style::default().fg(Color::Blue),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                format!(
+                    "Search {}",
+                    if app.search_query.is_empty() {
+                        "off".to_string()
+                    } else {
+                        format!("\"{}\"", app.search_query)
+                    }
+                ),
+                Style::default().fg(Color::Green),
+            ),
+            Span::raw("  "),
+            Span::styled(app.status.as_str(), Style::default().fg(Color::DarkGray)),
+        ]),
+    ])
+    .block(Block::default().borders(Borders::ALL).title("Context"));
     frame.render_widget(title, layout[0]);
 
     let items: Vec<ListItem> = app
         .tasks
         .iter()
-        .map(|task| {
+        .enumerate()
+        .map(|(index, task)| {
             let is_archived = is_archived_task(task, &app.repo.config.archive);
-            let status_style = if is_archived {
+            let is_selected = index == app.selected;
+            let title_style = if is_archived {
                 Style::default()
                     .fg(Color::DarkGray)
                     .add_modifier(Modifier::DIM)
-            } else if task.status == "done" || task.status == "cancelled" {
-                Style::default().fg(Color::Green)
             } else {
-                Style::default().fg(Color::Cyan)
+                Style::default()
             };
-            let mut line = vec![Span::styled(format!("{:<12}", task.status), status_style)];
-            if is_archived {
-                line.push(Span::styled(" A ", Style::default().fg(Color::DarkGray)));
+            let mut primary = vec![Span::styled(task.title.clone(), title_style)];
+            let inline_meta = compact_task_meta(task, is_archived);
+            if !inline_meta.is_empty() {
+                primary.push(Span::raw("  "));
+                primary.extend(inline_meta);
             }
-            if task
-                .normalized_frontmatter
-                .get("recurrence")
-                .and_then(|value| value.as_str())
-                .is_some()
-            {
-                line.push(Span::styled(" R ", Style::default().fg(Color::Yellow)));
+
+            let mut lines = vec![Line::from(primary)];
+            if is_selected {
+                let secondary = selected_task_meta(task, is_archived);
+                if !secondary.is_empty() {
+                    lines.push(Line::from(secondary));
+                }
             }
-            if task.has_active_time_entry {
-                line.push(Span::styled(" * ", Style::default().fg(Color::Green)));
-            }
-            if let Some(due) = task.scheduled.as_deref().or(task.due.as_deref()) {
-                line.push(Span::styled(
-                    format!(" {} ", due),
-                    Style::default().fg(Color::Magenta),
-                ));
-            }
-            line.push(Span::raw(task.title.clone()));
-            ListItem::new(Line::from(line))
+            ListItem::new(lines)
         })
         .collect();
     let list = List::new(items)
-        .block(Block::default().title("Tasks").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title(format!("Tasks ({})", app.tasks.len()))
+                .borders(Borders::ALL),
+        )
+        .scroll_padding(2)
         .highlight_style(
             Style::default()
-                .bg(Color::Blue)
-                .fg(Color::White)
+                .bg(Color::Rgb(28, 48, 74))
                 .add_modifier(Modifier::BOLD),
         );
     let mut state = ListState::default();
@@ -305,42 +294,129 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         } else {
             "no"
         };
-        Paragraph::new(format!(
-            "Path: {}\nStatus: {}\nArchived: {}\nPriority: {}\nScheduled: {}\nDue: {}\nTracking: {}\nRecurring: {}\nRecurrence anchor: {}\nCompleted instances: {}\nSkipped instances: {}\n\n{}",
-            task.path,
-            task.status,
-            archived,
-            task.priority.clone().unwrap_or_default(),
-            task.scheduled.clone().unwrap_or_default(),
-            task.due.clone().unwrap_or_default(),
-            if task.has_active_time_entry { "active" } else { "inactive" },
-            recurring.unwrap_or(""),
-            recurrence_anchor,
-            complete_instances,
-            skipped_instances,
+        let mut lines = vec![
+            Line::from(Span::styled(
+                task.title.as_str(),
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            detail_line("Path", &task.path),
+            detail_line("Status", &task.status),
+            detail_line("Archived", archived),
+        ];
+        if let Some(priority) = task.priority.as_deref().filter(|value| !value.is_empty()) {
+            lines.push(detail_line("Priority", priority));
+        }
+        if let Some(scheduled) = task.scheduled.as_deref().filter(|value| !value.is_empty()) {
+            lines.push(detail_line("Scheduled", &get_date_part(scheduled)));
+        }
+        if let Some(due) = task.due.as_deref().filter(|value| !value.is_empty()) {
+            lines.push(detail_line("Due", &get_date_part(due)));
+        }
+        lines.push(detail_line(
+            "Tracking",
+            if task.has_active_time_entry {
+                "active"
+            } else {
+                "inactive"
+            },
+        ));
+        if let Some(value) = recurring.filter(|value| !value.is_empty()) {
+            lines.push(detail_line("Recurrence", value));
+        }
+        if !recurrence_anchor.is_empty() {
+            lines.push(detail_line("Recurrence anchor", recurrence_anchor));
+        }
+        if !complete_instances.is_empty() {
+            lines.push(detail_line("Completed", &complete_instances));
+        }
+        if !skipped_instances.is_empty() {
+            lines.push(detail_line("Skipped", &skipped_instances));
+        }
+
+        let body_preview = if task.body.trim().is_empty() {
+            vec![Line::from(Span::styled(
+                "No notes",
+                Style::default().fg(Color::DarkGray),
+            ))]
+        } else {
             task.body
-        ))
+                .lines()
+                .map(|line| Line::from(line.to_string()))
+                .collect::<Vec<_>>()
+        };
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Notes",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.extend(body_preview);
+
+        Paragraph::new(lines)
     } else {
-        Paragraph::new("No tasks")
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                "No tasks in this view",
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from("Try another view, clear search, or create a task."),
+        ])
     }
     .block(Block::default().title("Details").borders(Borders::ALL))
     .wrap(Wrap { trim: false });
     frame.render_widget(details, right[1]);
 
     if let Some(prompt) = app.input_prompt() {
-        let input = Paragraph::new(app.input_value.clone()).block(
-            Block::default()
-                .title(format!("{prompt} (Enter submit, Esc cancel)"))
-                .borders(Borders::ALL),
-        );
+        let title = if let Some((step, total, label)) = app.create_progress() {
+            format!("{prompt}  [{step}/{total}: {label}]")
+        } else if matches!(app.input_mode, crate::app::InputMode::ConfirmDelete) {
+            format!("{prompt}  [Enter confirm | Esc cancel]")
+        } else {
+            format!("{prompt}  [Enter submit | Esc cancel]")
+        };
+        let mut lines = if matches!(app.input_mode, crate::app::InputMode::ConfirmDelete) {
+            let task_title = app
+                .selected_task()
+                .map(|task| task.title.clone())
+                .unwrap_or_else(|| "selected task".to_string());
+            vec![
+                Line::from(format!("Delete {task_title}?")),
+                Line::from(Span::styled(
+                    "This removes the task file from the vault.",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]
+        } else {
+            vec![Line::from(app.input_value.clone())]
+        };
+        if matches!(app.input_mode, crate::app::InputMode::CreateDetails) {
+            lines.push(Line::from(Span::styled(
+                "Task body or notes. Leave blank to skip.",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        let input =
+            Paragraph::new(lines).block(Block::default().title(title).borders(Borders::ALL));
         frame.render_widget(input, layout[2]);
     }
 
-    let status = Paragraph::new(app.status.clone()).block(Block::default().borders(Borders::ALL));
+    let footer = Paragraph::new(vec![
+        Line::from(Span::styled(
+            app.status.as_str(),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(shortcut_line(app)),
+        Line::from(secondary_footer_line(app)),
+    ])
+    .block(Block::default().title("Help").borders(Borders::ALL))
+    .wrap(Wrap { trim: false });
     if has_input {
-        frame.render_widget(status, layout[3]);
+        frame.render_widget(footer, layout[3]);
     } else {
-        frame.render_widget(status, layout[2]);
+        frame.render_widget(footer, layout[2]);
     }
 
     if app.is_palette_active() {
@@ -481,7 +557,7 @@ fn draw_command_palette(frame: &mut Frame<'_>, app: &App) {
     frame.render_widget(Clear, area);
     frame.render_widget(
         Block::default()
-            .title("Command Palette")
+            .title(format!("Command Palette ({})", items.len()))
             .borders(Borders::ALL)
             .style(Style::default().bg(Color::Black)),
         area,
@@ -489,7 +565,11 @@ fn draw_command_palette(frame: &mut Frame<'_>, app: &App) {
     frame.render_widget(
         Paragraph::new(app.input_value.clone())
             .alignment(Alignment::Left)
-            .block(Block::default().title("Query").borders(Borders::ALL)),
+            .block(
+                Block::default()
+                    .title("Query (type to filter commands)")
+                    .borders(Borders::ALL),
+            ),
         layout[0],
     );
     frame.render_stateful_widget(
@@ -507,7 +587,7 @@ fn draw_command_palette(frame: &mut Frame<'_>, app: &App) {
     frame.render_widget(
         Paragraph::new(
             format!(
-                "Ctrl-P open  Up/Down move  Enter run  Esc cancel\nEntries show their normal hotkey in [brackets]. Views: {}",
+                "Enter run  Esc cancel  Up/Down move\nBrackets show direct hotkeys. Views: {}. Delete stays palette-only.",
                 palette_view_help(app)
             ),
         )
@@ -609,7 +689,7 @@ fn draw_date_picker(frame: &mut Frame<'_>, app: &App) {
     frame.render_widget(Clear, area);
     frame.render_widget(
         Block::default()
-            .title("Date Picker")
+            .title(app.input_prompt().unwrap_or("Date Picker"))
             .borders(Borders::ALL)
             .style(Style::default().bg(Color::Black)),
         area,
@@ -621,9 +701,20 @@ fn draw_date_picker(frame: &mut Frame<'_>, app: &App) {
         "(clear)"
     };
     frame.render_widget(
-        Paragraph::new(current)
-            .block(Block::default().title("Selected").borders(Borders::ALL))
-            .alignment(Alignment::Center),
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                current,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "Enter saves the highlighted value",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ])
+        .block(Block::default().title("Selected").borders(Borders::ALL))
+        .alignment(Alignment::Center),
         layout[0],
     );
 
@@ -634,12 +725,195 @@ fn draw_date_picker(frame: &mut Frame<'_>, app: &App) {
 
     frame.render_widget(
         Paragraph::new(
-            "Arrows move  H/L month  t today  c clear  / type ISO  Enter save  Esc cancel",
+            "Move arrows or hjkl  H/L month  t today\nc clear  / type ISO date  Enter save  Esc cancel",
         )
         .block(Block::default().title("Help").borders(Borders::ALL))
         .wrap(Wrap { trim: false }),
         layout[2],
     );
+}
+
+fn detail_line(label: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{label}: "),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(value.to_string()),
+    ])
+}
+
+fn shortcut_line(app: &App) -> Line<'static> {
+    let spans: Vec<Span<'static>> = app
+        .contextual_shortcuts()
+        .into_iter()
+        .enumerate()
+        .flat_map(|(index, (label, value))| {
+            let mut parts = Vec::new();
+            if index > 0 {
+                parts.push(Span::raw("  "));
+            }
+            parts.push(Span::styled(
+                format!("{label}: "),
+                Style::default().fg(Color::DarkGray),
+            ));
+            parts.push(Span::styled(value, Style::default().fg(Color::Cyan)));
+            parts
+        })
+        .collect();
+    Line::from(spans)
+}
+
+fn secondary_footer_line(app: &App) -> Line<'static> {
+    if let Some((step, total, label)) = app.create_progress() {
+        Line::from(vec![
+            Span::styled("Create flow: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("step {step}/{total} on {label}"),
+                Style::default().fg(Color::Yellow),
+            ),
+        ])
+    } else if app.search_query.is_empty() {
+        Line::from(vec![
+            Span::styled("Tip: ", Style::default().fg(Color::DarkGray)),
+            Span::raw("use "),
+            Span::styled("Ctrl-P", Style::default().fg(Color::Yellow)),
+            Span::raw(" for commands or "),
+            Span::styled("/", Style::default().fg(Color::Yellow)),
+            Span::raw(" to search."),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("Search active: ", Style::default().fg(Color::DarkGray)),
+            Span::raw("results are filtered live across title, notes, path, and priority."),
+        ])
+    }
+}
+
+fn compact_task_meta(
+    task: &crate::repository::TaskRecord,
+    is_archived: bool,
+) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled(
+        task.status.clone(),
+        compact_status_style(task.status.as_str(), is_archived),
+    )];
+    if let Some(date_span) = task
+        .due
+        .as_deref()
+        .map(|due| {
+            Span::styled(
+                format!("due {}", get_date_part(due)),
+                Style::default().fg(Color::LightRed),
+            )
+        })
+        .or_else(|| {
+            task.scheduled.as_deref().map(|scheduled| {
+                Span::styled(
+                    get_date_part(scheduled),
+                    Style::default().fg(Color::Magenta),
+                )
+            })
+        })
+    {
+        spans.push(Span::raw("  "));
+        spans.push(date_span);
+    }
+    if task.has_active_time_entry {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled("*", Style::default().fg(Color::Green)));
+    }
+    if task
+        .normalized_frontmatter
+        .get("recurrence")
+        .and_then(|value| value.as_str())
+        .is_some()
+    {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled("R", Style::default().fg(Color::Yellow)));
+    }
+    spans
+}
+
+fn selected_task_meta(
+    task: &crate::repository::TaskRecord,
+    is_archived: bool,
+) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut push_value = |label: &str, value: String, style: Style| {
+        if !spans.is_empty() {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled(
+            format!("{label}:"),
+            Style::default().fg(Color::DarkGray),
+        ));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(value, style));
+    };
+
+    if let Some(priority) = task.priority.as_deref().filter(|value| !value.is_empty()) {
+        push_value(
+            "priority",
+            priority.to_string(),
+            Style::default().fg(Color::Yellow),
+        );
+    }
+    if let Some(scheduled) = task.scheduled.as_deref().filter(|value| !value.is_empty()) {
+        push_value(
+            "scheduled",
+            get_date_part(scheduled),
+            Style::default().fg(Color::Magenta),
+        );
+    }
+    if let Some(due) = task.due.as_deref().filter(|value| !value.is_empty()) {
+        push_value(
+            "due",
+            get_date_part(due),
+            Style::default().fg(Color::LightRed),
+        );
+    }
+    if is_archived {
+        push_value(
+            "archive",
+            "yes".to_string(),
+            Style::default().fg(Color::DarkGray),
+        );
+    }
+    if task.has_active_time_entry {
+        push_value(
+            "tracking",
+            "active".to_string(),
+            Style::default().fg(Color::Green),
+        );
+    }
+    if let Some(recurrence) = task
+        .normalized_frontmatter
+        .get("recurrence")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+    {
+        push_value(
+            "recurs",
+            recurrence.to_string(),
+            Style::default().fg(Color::Yellow),
+        );
+    }
+    spans
+}
+
+fn compact_status_style(status: &str, is_archived: bool) -> Style {
+    if is_archived {
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM)
+    } else if status == "done" || status == "cancelled" {
+        Style::default().fg(Color::Green)
+    } else {
+        Style::default().fg(Color::Cyan)
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -665,34 +939,5 @@ fn numeric_view_slot(key: KeyEvent) -> Option<u8> {
     match key.code {
         KeyCode::Char(ch) if ('1'..='9').contains(&ch) => Some(ch as u8 - b'0'),
         _ => None,
-    }
-}
-
-fn binding_matches(key: KeyEvent, binding: &str) -> bool {
-    let normalized = binding.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "enter" => key.code == KeyCode::Enter,
-        "esc" | "escape" => key.code == KeyCode::Esc,
-        "left" => key.code == KeyCode::Left,
-        "right" => key.code == KeyCode::Right,
-        "up" => key.code == KeyCode::Up,
-        "down" => key.code == KeyCode::Down,
-        "pageup" => key.code == KeyCode::PageUp,
-        "pagedown" => key.code == KeyCode::PageDown,
-        "space" => key.code == KeyCode::Char(' '),
-        _ if normalized.starts_with("ctrl-") => {
-            let expected = normalized.trim_start_matches("ctrl-");
-            matches!(key.code, KeyCode::Char(ch) if expected == ch.to_string())
-                && key.modifiers.contains(KeyModifiers::CONTROL)
-        }
-        _ if normalized.starts_with("shift-") => {
-            let expected = normalized.trim_start_matches("shift-");
-            matches!(key.code, KeyCode::Char(ch) if expected == ch.to_ascii_lowercase().to_string())
-                && key.modifiers.contains(KeyModifiers::SHIFT)
-        }
-        _ if normalized.len() == 1 => {
-            matches!(key.code, KeyCode::Char(ch) if normalized == ch.to_ascii_lowercase().to_string())
-        }
-        _ => false,
     }
 }

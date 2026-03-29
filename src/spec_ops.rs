@@ -1,7 +1,8 @@
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use mdbase::Collection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -23,6 +24,10 @@ use crate::recurrence::{
     recalculate as recurrence_recalculate, skip_instance as recurrence_skip_instance,
     uncomplete_instance as recurrence_uncomplete_instance,
     unskip_instance as recurrence_unskip_instance, RecurrenceInput,
+};
+use crate::task_ops::{
+    apply_explicit_rename, apply_title_update, archive_apply, atomic_write, check_idempotency,
+    complete_nonrecurring, ensure_delete_allowed, mutate_with_validation, uncomplete_nonrecurring,
 };
 use crate::time_tracking::{
     auto_stop_on_complete as time_auto_stop_on_complete, remove_entry as time_remove_entry,
@@ -51,7 +56,7 @@ pub fn metadata() -> Metadata {
         version: env!("CARGO_PKG_VERSION").into(),
         spec_version: "0.1.0-draft".into(),
         validation_modes: vec!["strict".into()],
-        profiles: vec!["core-lite".into(), "recurrence".into(), "extended".into()],
+        profiles: vec!["core-lite".into(), "recurrence".into()],
         capabilities: vec![
             "date".into(),
             "field-mapping".into(),
@@ -62,11 +67,8 @@ pub fn metadata() -> Metadata {
             "config-lite".into(),
             "validation-core".into(),
             "time-tracking".into(),
-            "dependencies".into(),
-            "reminders".into(),
-            "links".into(),
             "archive".into(),
-            "extended".into(),
+            "rename".into(),
         ],
         known_deviations: vec!["tasknotes-tui-bridge-partial".into()],
         compatibility_mode: "bridge".into(),
@@ -357,29 +359,13 @@ fn execute_inner(operation: &str, input: &Value) -> Result<Value> {
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
-            let payload = serde_json::Map::from_iter([(
-                "frontmatter".to_string(),
-                Value::Object(frontmatter),
-            )]);
-            let result = validate_core(
-                &payload,
+            mutate_with_validation(
+                &frontmatter,
                 input
                     .get("strict")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
-            );
-            if result.get("hasErrors").and_then(Value::as_bool) == Some(true) {
-                anyhow::bail!(
-                    "validation:{}",
-                    result
-                        .get("errorCodes")
-                        .and_then(Value::as_array)
-                        .and_then(|arr| arr.first())
-                        .and_then(Value::as_str)
-                        .unwrap_or("invalid")
-                );
-            }
-            Ok(json!({ "value": "accepted" }))
+            )
         }
         "op.atomic_write" => {
             let original = input
@@ -392,19 +378,23 @@ fn execute_inner(operation: &str, input: &Value) -> Result<Value> {
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
-            let simulate_failure = input
-                .get("simulateFailureAfterWrite")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let mut persisted = original.clone();
-            if !simulate_failure {
-                for (k, v) in patch {
-                    persisted.insert(k, v);
-                }
-            }
-            Ok(json!({ "committed": !simulate_failure, "persisted": persisted }))
+            Ok(atomic_write(
+                &original,
+                &patch,
+                input
+                    .get("simulateFailureAfterWrite")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            ))
         }
-        "op.idempotency_check" => Ok(json!({ "idempotent": true })),
+        "op.idempotency_check" => check_idempotency(
+            input
+                .get("operation")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            input.get("first").unwrap_or(&Value::Null),
+            input.get("second").unwrap_or(&Value::Null),
+        ),
         "op.update_patch" => {
             let before = input
                 .get("original")
@@ -417,11 +407,7 @@ fn execute_inner(operation: &str, input: &Value) -> Result<Value> {
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
-            let mut merged = before.clone();
-            for (key, value) in patch {
-                merged.insert(key, value);
-            }
-            let changed = merged != before;
+            let (changed, merged) = crate::task_ops::apply_patch(&before, &patch);
             Ok(json!({ "changed": changed, "frontmatter": merged }))
         }
         "op.complete_nonrecurring" => {
@@ -431,7 +417,6 @@ fn execute_inner(operation: &str, input: &Value) -> Result<Value> {
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
-            let mut after = before.clone();
             let status = input
                 .get("completedStatus")
                 .and_then(Value::as_str)
@@ -445,14 +430,11 @@ fn execute_inner(operation: &str, input: &Value) -> Result<Value> {
                         .map(str::to_string)
                 })
                 .unwrap_or_else(|| "done".to_string());
-            let completion_date = resolve_operation_target_date(
+            Ok(Value::Object(complete_nonrecurring(
+                &before,
+                &status,
                 input.get("explicitDate").and_then(Value::as_str),
-                None,
-                None,
-            )?;
-            after.insert("status".into(), Value::String(status));
-            after.insert("completedDate".into(), Value::String(completion_date));
-            Ok(Value::Object(after))
+            )?))
         }
         "op.uncomplete_nonrecurring" => {
             let before = input
@@ -461,76 +443,86 @@ fn execute_inner(operation: &str, input: &Value) -> Result<Value> {
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
-            let mut after = before.clone();
             let status = input
                 .get("defaultStatus")
                 .or_else(|| input.get("openStatus"))
                 .and_then(Value::as_str)
                 .unwrap_or("open");
-            after.insert("status".into(), Value::String(status.to_string()));
-            if input
-                .get("clearCompletedDate")
-                .and_then(Value::as_bool)
-                .unwrap_or(true)
-            {
-                after.insert("completedDate".into(), Value::Null);
-            }
-            Ok(Value::Object(after))
+            Ok(Value::Object(uncomplete_nonrecurring(
+                &before,
+                status,
+                input
+                    .get("clearCompletedDate")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+            )))
         }
         "archive.apply" => {
-            let mode = input.get("mode").and_then(Value::as_str).unwrap_or("tag");
-            if mode == "delete" {
-                Ok(json!({ "deleted": true }))
-            } else {
-                let mut frontmatter = input
+            let mut archive = crate::config::EffectiveConfig::default().archive;
+            if let Some(tag) = input.get("archiveTag").and_then(Value::as_str) {
+                archive.tag = tag.trim().to_string();
+            }
+            if let Some(field) = input.get("archiveField").and_then(Value::as_str) {
+                archive.field = field.trim().to_string();
+            }
+            Ok(archive_apply(
+                &input
                     .get("frontmatter")
                     .and_then(Value::as_object)
                     .cloned()
-                    .unwrap_or_default();
-                let archive_tag = input
-                    .get("archiveTag")
-                    .and_then(Value::as_str)
-                    .unwrap_or("archived")
-                    .trim()
-                    .to_string();
-                let archive_field = input
-                    .get("archiveField")
-                    .and_then(Value::as_str)
-                    .unwrap_or("archived")
-                    .trim()
-                    .to_string();
-
-                if !archive_field.is_empty() {
-                    frontmatter.insert(archive_field, Value::Bool(true));
-                }
-                if !archive_tag.is_empty() {
-                    let mut tags: Vec<String> = match frontmatter.get("tags") {
-                        Some(Value::Array(values)) => values
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .map(str::to_string)
-                            .collect(),
-                        Some(Value::String(value)) => value
-                            .split(',')
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                            .map(str::to_string)
-                            .collect(),
-                        _ => Vec::new(),
-                    };
-                    if !tags.iter().any(|tag| {
-                        tag.eq_ignore_ascii_case(&archive_tag)
-                            || tag.eq_ignore_ascii_case(&format!("#{archive_tag}"))
-                    }) {
-                        tags.push(archive_tag);
-                    }
-                    frontmatter.insert(
-                        "tags".into(),
-                        Value::Array(tags.into_iter().map(Value::String).collect()),
-                    );
-                }
-                Ok(json!({ "deleted": false, "frontmatter": frontmatter }))
-            }
+                    .unwrap_or_default(),
+                &archive,
+                input.get("mode").and_then(Value::as_str).unwrap_or("tag"),
+            ))
+        }
+        "rename.apply" => Ok(apply_explicit_rename(
+            input
+                .get("toPath")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            &input
+                .get("frontmatter")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default(),
+            input
+                .get("titleStorage")
+                .and_then(Value::as_str)
+                .unwrap_or("frontmatter"),
+            input
+                .get("updateReferences")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        )),
+        "rename.title_storage_interaction" => {
+            let old_path = input
+                .get("oldPath")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let new_title = input
+                .get("newTitle")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let title_storage = input
+                .get("titleStorage")
+                .and_then(Value::as_str)
+                .unwrap_or("frontmatter");
+            let frontmatter = input
+                .get("frontmatter")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_else(|| {
+                    let mut frontmatter = serde_json::Map::new();
+                    frontmatter.insert("title".into(), Value::String("Old".into()));
+                    frontmatter
+                });
+            let (path, renamed, frontmatter) =
+                apply_title_update(old_path, &frontmatter, new_title, title_storage);
+            Ok(json!({
+                "path": path,
+                "renamed": renamed,
+                "frontmatter": frontmatter,
+            }))
         }
         "op.error_shape" => Ok(json!({
             "operation": input.get("operation").and_then(Value::as_str).unwrap_or("unknown"),
@@ -540,17 +532,35 @@ fn execute_inner(operation: &str, input: &Value) -> Result<Value> {
         })),
         "create_compat.create" => Ok(create_task_with_compat(input)?),
         "delete.remove" => {
-            if input.get("checkBacklinks").and_then(Value::as_bool) == Some(true)
-                && input.get("force").and_then(Value::as_bool) != Some(true)
-                && input
+            ensure_delete_allowed(
+                input.get("checkBacklinks").and_then(Value::as_bool) == Some(true),
+                input.get("force").and_then(Value::as_bool) == Some(true),
+                input
                     .get("brokenLinks")
                     .and_then(Value::as_array)
-                    .map(|a| !a.is_empty())
-                    .unwrap_or(false)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            )?;
+            if let Some(root) = input
+                .get("root")
+                .or_else(|| input.get("collectionRoot"))
+                .and_then(Value::as_str)
             {
-                anyhow::bail!("backlink requires force");
+                let collection = Collection::open(Path::new(root)).map_err(|error| {
+                    anyhow::anyhow!("failed to open mdbase collection: {}", error)
+                })?;
+                let payload = json!({
+                    "path": input.get("path").and_then(Value::as_str).unwrap_or_default(),
+                    "check_backlinks": input.get("checkBacklinks").and_then(Value::as_bool).unwrap_or(false),
+                });
+                let result = collection.delete(&payload);
+                if let Some(error) = result.get("error") {
+                    anyhow::bail!("{}", error);
+                }
+                Ok(result)
+            } else {
+                Ok(json!({ "deleted": true }))
             }
-            Ok(json!({ "deleted": true }))
         }
         "recurrence.complete" => {
             let payload = recurrence_input(input);
@@ -1124,6 +1134,24 @@ mod tests {
                 .any(|cap| cap == "archive"),
             true
         );
+        assert_eq!(
+            claim["result"]["capabilities"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .any(|cap| cap == "dependencies" || cap == "reminders" || cap == "links"),
+            false
+        );
+        assert_eq!(
+            claim["result"]["profiles"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .any(|profile| profile == "extended"),
+            false
+        );
 
         let result = execute(
             "archive.apply",
@@ -1149,5 +1177,87 @@ mod tests {
             .flatten()
             .filter_map(Value::as_str)
             .any(|tag| tag == "archived"));
+    }
+
+    #[test]
+    fn rename_ops_are_claimed_and_follow_title_storage_rules() {
+        let claim = execute("meta.claim", &json!({}));
+        assert_eq!(
+            claim["result"]["capabilities"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .any(|cap| cap == "rename"),
+            true
+        );
+
+        let explicit = execute(
+            "rename.apply",
+            &json!({
+                "toPath": "tasks/New-Title.md",
+                "titleStorage": "filename",
+                "updateReferences": true,
+                "frontmatter": {
+                    "title": "Old",
+                    "id": "abc"
+                }
+            }),
+        );
+        assert_eq!(
+            explicit["result"]["path"].as_str(),
+            Some("tasks/New-Title.md")
+        );
+        assert_eq!(
+            explicit["result"]["referencesUpdated"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            explicit["result"]["frontmatter"]["title"].as_str(),
+            Some("New Title")
+        );
+        assert_eq!(
+            explicit["result"]["frontmatter"]["id"].as_str(),
+            Some("abc")
+        );
+
+        let title_filename = execute(
+            "rename.title_storage_interaction",
+            &json!({
+                "titleStorage": "filename",
+                "oldPath": "tasks/Old.md",
+                "newTitle": "New Title"
+            }),
+        );
+        assert_eq!(
+            title_filename["result"]["path"].as_str(),
+            Some("tasks/new-title.md")
+        );
+        assert_eq!(title_filename["result"]["renamed"].as_bool(), Some(true));
+        assert_eq!(
+            title_filename["result"]["frontmatter"]["title"].as_str(),
+            Some("New Title")
+        );
+
+        let title_frontmatter = execute(
+            "rename.title_storage_interaction",
+            &json!({
+                "titleStorage": "frontmatter",
+                "oldPath": "tasks/Old.md",
+                "newTitle": "New Title"
+            }),
+        );
+        assert_eq!(
+            title_frontmatter["result"]["path"].as_str(),
+            Some("tasks/Old.md")
+        );
+        assert_eq!(
+            title_frontmatter["result"]["renamed"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            title_frontmatter["result"]["frontmatter"]["title"].as_str(),
+            Some("New Title")
+        );
     }
 }

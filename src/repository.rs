@@ -8,12 +8,19 @@ use serde_json::{json, Map, Value};
 
 use crate::config::{load_effective_config, ArchiveConfig, EffectiveConfig};
 use crate::create_compat::create_task_with_compat;
-use crate::date::{get_date_part, is_before_date_safe, today_local};
+use crate::date::{apply_day_offset, get_date_part, is_before_date_safe, today_local};
 use crate::field_mapping::{
     default_completed_status, denormalize_frontmatter, field_mapping_from_config,
     is_completed_status, normalize_frontmatter, resolve_display_title, FieldMapping,
 };
-use crate::recurrence::{complete as complete_recurring, RecurrenceInput};
+use crate::recurrence::{
+    complete as complete_recurring, recalculate as recalculate_recurring,
+    uncomplete_instance as uncomplete_recurring_instance, RecurrenceInput,
+};
+use crate::task_ops::{
+    apply_title_update, clear_archive_markers, complete_nonrecurring, ensure_archive_markers,
+    ensure_delete_allowed, is_archived, uncomplete_nonrecurring,
+};
 use crate::time_tracking;
 use crate::view_query::ViewEvalSupport;
 
@@ -279,6 +286,7 @@ impl TaskRepository {
             .get("recurrence")
             .and_then(Value::as_str)
             .is_some();
+        let today = today_local();
 
         if is_recurring {
             let input = RecurrenceInput {
@@ -327,31 +335,73 @@ impl TaskRepository {
                     })
                     .unwrap_or_default(),
             };
-            let completion = complete_recurring(&input, &today_local())?;
-            if let Some(value) = completion.get("completeInstances") {
-                normalized.insert("completeInstances".into(), value.clone());
-            }
-            if let Some(value) = completion.get("skippedInstances") {
-                normalized.insert("skippedInstances".into(), value.clone());
-            }
-            if let Some(value) = completion.get("nextScheduled") {
-                normalized.insert("scheduled".into(), value.clone());
-            }
-            if let Some(value) = completion.get("nextDue") {
-                normalized.insert("due".into(), value.clone());
+            let already_completed_today = input
+                .complete_instances
+                .iter()
+                .any(|value| get_date_part(value) == today);
+            if already_completed_today {
+                let completion =
+                    uncomplete_recurring_instance(&input.complete_instances, today.as_str());
+                let complete_instances = completion
+                    .get("completeInstances")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                normalized.insert("completeInstances".into(), Value::Array(complete_instances));
+
+                let reference_date = apply_day_offset(&today, -1).unwrap_or_else(|| today.clone());
+                let recalculated = recalculate_recurring(
+                    &RecurrenceInput {
+                        complete_instances: normalized
+                            .get("completeInstances")
+                            .and_then(Value::as_array)
+                            .map(|values| {
+                                values
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::to_string)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        ..input
+                    },
+                    reference_date.as_str(),
+                )?;
+                if let Some(value) = recalculated.get("nextScheduled") {
+                    normalized.insert("scheduled".into(), value.clone());
+                }
+                if let Some(value) = recalculated.get("nextDue") {
+                    normalized.insert("due".into(), value.clone());
+                }
+                if let Some(value) = recalculated.get("updatedRecurrence") {
+                    normalized.insert("recurrence".into(), value.clone());
+                }
+            } else {
+                let completion = complete_recurring(&input, today.as_str())?;
+                if let Some(value) = completion.get("completeInstances") {
+                    normalized.insert("completeInstances".into(), value.clone());
+                }
+                if let Some(value) = completion.get("skippedInstances") {
+                    normalized.insert("skippedInstances".into(), value.clone());
+                }
+                if let Some(value) = completion.get("nextScheduled") {
+                    normalized.insert("scheduled".into(), value.clone());
+                }
+                if let Some(value) = completion.get("nextDue") {
+                    normalized.insert("due".into(), value.clone());
+                }
+                if let Some(value) = completion.get("updatedRecurrence") {
+                    normalized.insert("recurrence".into(), value.clone());
+                }
             }
         } else if is_completed_status(&self.field_mapping, Some(&task.status)) {
-            normalized.insert(
-                "status".into(),
-                Value::String(self.config.defaults.status.clone()),
-            );
-            normalized.remove("completedDate");
+            normalized = uncomplete_nonrecurring(&normalized, &self.config.defaults.status, true);
         } else {
-            normalized.insert(
-                "status".into(),
-                Value::String(default_completed_status(&self.field_mapping)),
-            );
-            normalized.insert("completedDate".into(), Value::String(today_local()));
+            normalized = complete_nonrecurring(
+                &normalized,
+                &default_completed_status(&self.field_mapping),
+                Some(today.as_str()),
+            )?;
         }
 
         normalized.insert(
@@ -562,33 +612,29 @@ impl TaskRepository {
         let title = title.trim();
         anyhow::ensure!(!title.is_empty(), "title must not be empty");
         let collection = self.collection()?;
-        let mut normalized = task.normalized_frontmatter.clone();
-        normalized.insert("title".into(), Value::String(title.to_string()));
-
         let old_path = task.path.clone();
-        let maybe_new_path = if self.config.title.storage == "filename" {
-            Some(rename_task_path(&old_path, title))
-        } else {
-            None
-        };
+        let (new_path, renamed, normalized) = apply_title_update(
+            &old_path,
+            &task.normalized_frontmatter,
+            title,
+            &self.config.title.storage,
+        );
         let fields = denormalize_frontmatter(&normalized, &self.field_mapping);
         let result = collection.update(&json!({ "path": old_path, "fields": fields }));
         if let Some(error) = result.get("error") {
             return Err(anyhow!("update failed: {}", error));
         }
         let mut current_path = task.path.clone();
-        if let Some(new_path) = maybe_new_path {
-            if new_path != task.path {
-                let rename_result = collection.rename(&json!({
-                    "from": task.path,
-                    "to": new_path,
-                    "update_refs": true
-                }));
-                if let Some(error) = rename_result.get("error") {
-                    return Err(anyhow!("rename failed: {}", error));
-                }
-                current_path = new_path;
+        if renamed {
+            let rename_result = collection.rename(&json!({
+                "from": task.path,
+                "to": new_path,
+                "update_refs": true
+            }));
+            if let Some(error) = rename_result.get("error") {
+                return Err(anyhow!("rename failed: {}", error));
             }
+            current_path = new_path;
         }
         self.read_task(&current_path)
     }
@@ -627,6 +673,19 @@ impl TaskRepository {
             }
         }
         self.write_task_update(task, normalized)
+    }
+
+    pub fn delete_task(&self, task: &TaskRecord) -> anyhow::Result<()> {
+        let collection = self.collection()?;
+        ensure_delete_allowed(false, true, &[])?;
+        let result = collection.delete(&json!({
+            "path": task.path,
+            "check_backlinks": false
+        }));
+        if let Some(error) = result.get("error") {
+            return Err(anyhow!("delete failed: {}", error));
+        }
+        Ok(())
     }
 
     pub fn toggle_archive(&self, task: &TaskRecord) -> anyhow::Result<TaskRecord> {
@@ -764,102 +823,8 @@ fn slugify(value: &str) -> String {
         .join("-")
 }
 
-fn rename_task_path(old_path: &str, title: &str) -> String {
-    let stem = slugify(title);
-    let old = Path::new(old_path);
-    let parent = old.parent().map(|path| path.to_string_lossy().to_string());
-    match parent {
-        Some(parent) if !parent.is_empty() => format!("{parent}/{stem}.md"),
-        _ => format!("{stem}.md"),
-    }
-}
-
 pub fn is_archived_task(task: &TaskRecord, archive: &ArchiveConfig) -> bool {
-    task.normalized_frontmatter
-        .get(&archive.field)
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        || task
-            .normalized_frontmatter
-            .get("tags")
-            .map(|value| tags_contain_archive_tag(value, &archive.tag))
-            .unwrap_or(false)
-        || is_path_in_folder(&task.path, &archive.folder)
-}
-
-fn tags_contain_archive_tag(value: &Value, archive_tag: &str) -> bool {
-    let archive_tag = archive_tag.trim();
-    if archive_tag.is_empty() {
-        return false;
-    }
-    let with_hash = format!("#{archive_tag}");
-    match value {
-        Value::Array(values) => values.iter().filter_map(Value::as_str).any(|tag| {
-            tag.eq_ignore_ascii_case(archive_tag) || tag.eq_ignore_ascii_case(&with_hash)
-        }),
-        Value::String(value) => value.split(',').map(str::trim).any(|tag| {
-            tag.eq_ignore_ascii_case(archive_tag) || tag.eq_ignore_ascii_case(&with_hash)
-        }),
-        _ => false,
-    }
-}
-
-fn ensure_archive_markers(normalized: &mut Map<String, Value>, archive: &ArchiveConfig) {
-    normalized.insert(archive.field.clone(), Value::Bool(true));
-    let mut tags: Vec<String> = normalized.get("tags").map(read_tags).unwrap_or_default();
-    if !archive.tag.trim().is_empty()
-        && !tags.iter().any(|tag| {
-            tag.eq_ignore_ascii_case(&archive.tag)
-                || tag.eq_ignore_ascii_case(&format!("#{}", archive.tag))
-        })
-    {
-        tags.push(archive.tag.clone());
-    }
-    normalized.insert(
-        "tags".into(),
-        Value::Array(tags.into_iter().map(Value::String).collect()),
-    );
-}
-
-fn clear_archive_markers(normalized: &mut Map<String, Value>, archive: &ArchiveConfig) {
-    normalized.insert(archive.field.clone(), Value::Bool(false));
-    let mut tags: Vec<String> = normalized
-        .get("tags")
-        .map(read_tags)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|tag| {
-            !tag.eq_ignore_ascii_case(&archive.tag)
-                && !tag.eq_ignore_ascii_case(&format!("#{}", archive.tag))
-        })
-        .collect();
-    normalized.insert(
-        "tags".into(),
-        Value::Array(tags.drain(..).map(Value::String).collect()),
-    );
-}
-
-fn read_tags(value: &Value) -> Vec<String> {
-    match value {
-        Value::Array(values) => values
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect(),
-        Value::String(value) => value
-            .split(',')
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn is_path_in_folder(path: &str, folder: &str) -> bool {
-    let folder = folder.trim_matches('/').replace('\\', "/");
-    let path = path.trim_start_matches('/').replace('\\', "/");
-    !folder.is_empty() && (path == folder || path.starts_with(&format!("{folder}/")))
+    is_archived(&task.normalized_frontmatter, &task.path, archive)
 }
 
 fn archived_path_for_task(task: &TaskRecord, archive: &ArchiveConfig) -> String {
@@ -1091,6 +1056,103 @@ fields:
             .and_then(Value::as_array)
             .unwrap();
         assert!(skipped
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|value| value == today));
+    }
+
+    #[test]
+    fn toggling_recurring_completion_twice_reopens_today_instance() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let today = today_local();
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task("Recurring complete").unwrap();
+        let task = repo
+            .search_tasks(TaskFilter::All, Some("Recurring complete"), &today)
+            .unwrap();
+        assert_eq!(task.len(), 1);
+        repo.update_date_field(&task[0], "scheduled", Some(today.as_str()))
+            .unwrap();
+        let mut recurring = repo.read_task(&task[0].path).unwrap();
+        recurring
+            .normalized_frontmatter
+            .insert("recurrence".into(), Value::String("FREQ=DAILY".into()));
+        recurring
+            .normalized_frontmatter
+            .insert("recurrenceAnchor".into(), Value::String("scheduled".into()));
+        repo.write_task_update(&recurring, recurring.normalized_frontmatter.clone())
+            .unwrap();
+
+        let recurring = repo.read_task(&task[0].path).unwrap();
+        repo.toggle_complete(&recurring).unwrap();
+        let completed = repo.read_task(&recurring.path).unwrap();
+        let completed_instances = completed
+            .normalized_frontmatter
+            .get("completeInstances")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert!(completed_instances
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|value| value == today));
+
+        repo.toggle_complete(&completed).unwrap();
+        let reopened = repo.read_task(&recurring.path).unwrap();
+        let complete_instances = reopened
+            .normalized_frontmatter
+            .get("completeInstances")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert!(!complete_instances
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|value| value == today));
+        assert_eq!(reopened.scheduled.as_deref(), Some(today.as_str()));
+    }
+
+    #[test]
+    fn skip_recurring_task_today_toggles_off() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let today = today_local();
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task("Recurring skip").unwrap();
+        let task = repo
+            .search_tasks(TaskFilter::All, Some("Recurring skip"), &today)
+            .unwrap();
+        assert_eq!(task.len(), 1);
+        repo.update_date_field(&task[0], "scheduled", Some(today.as_str()))
+            .unwrap();
+        let mut recurring = repo.read_task(&task[0].path).unwrap();
+        recurring
+            .normalized_frontmatter
+            .insert("recurrence".into(), Value::String("FREQ=DAILY".into()));
+        recurring
+            .normalized_frontmatter
+            .insert("recurrenceAnchor".into(), Value::String("scheduled".into()));
+        repo.write_task_update(&recurring, recurring.normalized_frontmatter.clone())
+            .unwrap();
+
+        let recurring = repo.read_task(&task[0].path).unwrap();
+        repo.toggle_skip_today(&recurring).unwrap();
+        let skipped = repo.read_task(&recurring.path).unwrap();
+        assert!(skipped
+            .normalized_frontmatter
+            .get("skippedInstances")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|value| value == today));
+
+        repo.toggle_skip_today(&skipped).unwrap();
+        let unskipped = repo.read_task(&recurring.path).unwrap();
+        assert!(!unskipped
+            .normalized_frontmatter
+            .get("skippedInstances")
+            .and_then(Value::as_array)
+            .unwrap()
             .iter()
             .filter_map(Value::as_str)
             .any(|value| value == today));
@@ -1355,5 +1417,27 @@ archive:
             .collect();
 
         assert!(titles.iter().any(|title| title == "Typed task"));
+    }
+
+    #[test]
+    fn delete_task_removes_it_from_lists() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task("Delete me").unwrap();
+        let tasks = repo.list_tasks(TaskFilter::Open, &today_local()).unwrap();
+        assert_eq!(tasks.len(), 1);
+
+        repo.delete_task(&tasks[0]).unwrap();
+
+        assert!(repo
+            .list_tasks(TaskFilter::Open, &today_local())
+            .unwrap()
+            .is_empty());
+        assert!(repo
+            .list_tasks(TaskFilter::All, &today_local())
+            .unwrap()
+            .is_empty());
     }
 }
