@@ -1,0 +1,4 @@
+task_detection:
+  method: property
+  property_name: status
+  property_value: ""

@@ -1,0 +1,20 @@
+views:
+  1:
+    label: "Open"
+    kind: "open"
+  2:
+    label: "Today"
+    kind: "date"
+  3:
+    label: "Doing"
+    kind: "status"
+    value: "doing"
+  4:
+    label: "Overdue"
+    kind: "overdue"
+  5:
+    label: "Tracked"
+    kind: "tracked"
+  6:
+    label: "All"
+    kind: "all"

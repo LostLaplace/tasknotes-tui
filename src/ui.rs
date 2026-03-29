@@ -13,7 +13,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap},
     DefaultTerminal, Frame,
 };
 
@@ -118,23 +118,18 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
     Ok(false)
 }
 
-fn draw(frame: &mut Frame<'_>, app: &App) {
+pub fn draw(frame: &mut Frame<'_>, app: &App) {
     let has_input = app.input_prompt().is_some();
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if has_input {
             vec![
-                Constraint::Length(4),
+                Constraint::Length(10),
                 Constraint::Min(10),
-                Constraint::Length(4),
                 Constraint::Length(4),
             ]
         } else {
-            vec![
-                Constraint::Length(4),
-                Constraint::Min(10),
-                Constraint::Length(4),
-            ]
+            vec![Constraint::Length(10), Constraint::Min(10)]
         })
         .split(frame.area());
 
@@ -142,10 +137,14 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
         .split(layout[1]);
-    let right = Layout::default()
+    let support = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(25), Constraint::Min(10)])
+        .split(layout[0]);
+    let support_left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(10), Constraint::Min(10)])
-        .split(body[1]);
+        .constraints([Constraint::Length(4), Constraint::Length(6)])
+        .split(support[1]);
 
     let title = Paragraph::new(vec![
         Line::from(vec![
@@ -196,8 +195,21 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
             Span::styled(app.status.as_str(), Style::default().fg(Color::DarkGray)),
         ]),
     ])
-    .block(Block::default().borders(Borders::ALL).title("Context"));
-    frame.render_widget(title, layout[0]);
+    .block(Block::default().title("State").borders(Borders::ALL));
+    frame.render_widget(title, support_left[0]);
+
+    let help = Paragraph::new(vec![
+        Line::from(shortcut_line(app)),
+        Line::from(secondary_footer_line(app)),
+    ])
+    .block(Block::default().title("Help").borders(Borders::ALL))
+    .wrap(Wrap { trim: false });
+    frame.render_widget(help, support_left[1]);
+
+    frame.render_widget(
+        draw_calendar(&app.focus_date, &app.calendar_tasks),
+        support[0],
+    );
 
     let items: Vec<ListItem> = app
         .tasks
@@ -247,11 +259,6 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         state.select(Some(app.selected));
     }
     frame.render_stateful_widget(list, body[0], &mut state);
-
-    frame.render_widget(
-        draw_calendar(&app.focus_date, &app.calendar_tasks),
-        right[0],
-    );
 
     let details = if let Some(task) = app.selected_task() {
         let recurring = task
@@ -367,7 +374,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     }
     .block(Block::default().title("Details").borders(Borders::ALL))
     .wrap(Wrap { trim: false });
-    frame.render_widget(details, right[1]);
+    frame.render_widget(details, body[1]);
 
     if let Some(prompt) = app.input_prompt() {
         let title = if let Some((step, total, label)) = app.create_progress() {
@@ -401,22 +408,6 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         let input =
             Paragraph::new(lines).block(Block::default().title(title).borders(Borders::ALL));
         frame.render_widget(input, layout[2]);
-    }
-
-    let footer = Paragraph::new(vec![
-        Line::from(Span::styled(
-            app.status.as_str(),
-            Style::default().fg(Color::White),
-        )),
-        Line::from(shortcut_line(app)),
-        Line::from(secondary_footer_line(app)),
-    ])
-    .block(Block::default().title("Help").borders(Borders::ALL))
-    .wrap(Wrap { trim: false });
-    if has_input {
-        frame.render_widget(footer, layout[3]);
-    } else {
-        frame.render_widget(footer, layout[2]);
     }
 
     if app.is_palette_active() {
@@ -498,7 +489,12 @@ fn draw_calendar(
     }
 
     Paragraph::new(lines)
-        .block(Block::default().title("Calendar").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title("Calendar")
+                .borders(Borders::ALL)
+                .padding(Padding::left(1)),
+        )
         .wrap(Wrap { trim: false })
 }
 

@@ -22,7 +22,10 @@ The interactive TUI uses `mdbase-rs` for collection reads and writes. The repo a
 
 ```bash
 cargo run --bin tasknotes-tui -- --root /path/to/vault
+cargo run --bin tasknotes-tui -- --root /path/to/vault --focus-date 2026-03-29
 cargo run --bin tasknotes-tui -- print-default-config
+cargo run --bin tasknotes-tui -- --root /path/to/vault render-snapshot --width 120 --height 32
+cargo run --bin tasknotes-tui -- --root docs/demo-vault seed-demo-vault
 ```
 
 The target vault must be readable by `mdbase-rs`, which means it should contain `mdbase.yaml` and a task type definition.
@@ -60,7 +63,7 @@ The runtime reads the vault-root `tasknotes.yaml` TaskNotes-spec config for fiel
 - `h` / `l` or left/right: move focused date by one day
 - `PgUp` / `PgDn`: move focused date by one week
 - `g`: jump focused date to today
-- `j` / `k`: move
+- `j` / `k` or up/down: move
 - `1`: open tasks
 - `2`: date filter for the focused day
 - `3`: overdue
@@ -204,9 +207,39 @@ Available expression context includes normal normalized task fields like `status
 
 ## Calendar
 
-The right pane includes a mini monthly calendar. The highlighted day is the focused date, and dates with tasks are marked with `*`.
+The top context pane includes a mini monthly calendar. The highlighted day is the focused date, and dates with tasks are marked with `*`.
 
 When the date view is active with `2`, the task list shows tasks for the focused date. Use `h`/`l`, left/right, `PgUp`/`PgDn`, or `g` to move around the calendar.
+
+## Snapshots And Recordings
+
+For deterministic debugging and documentation capture, the CLI supports both a fixed initial focus date and a snapshot render mode.
+
+Render a single frame of the TUI to stdout:
+
+```bash
+cargo run --bin tasknotes-tui -- \
+  --root docs/demo-vault \
+  --focus-date 2026-03-29 \
+  render-snapshot --width 120 --height 32
+```
+
+The repo also includes a demo vault skeleton at [docs/demo-vault](/home/calluma/projects/tasknotes-tui/docs/demo-vault) plus `vhs` tapes in [docs/vhs](/home/calluma/projects/tasknotes-tui/docs/vhs). Seed the sample data before capturing:
+
+```bash
+cargo run --bin tasknotes-tui -- --root docs/demo-vault seed-demo-vault
+```
+
+Useful commands:
+
+```bash
+npm run docs:seed-demo-vault
+npm run docs:snapshot
+npm run docs:vhs:overview
+npm run docs:vhs:workflow
+```
+
+These expect `vhs` to be installed locally for the GIF captures.
 
 ## Date Editing
 

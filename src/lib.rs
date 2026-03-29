@@ -5,6 +5,7 @@ pub mod date;
 pub mod field_mapping;
 pub mod recurrence;
 pub mod repository;
+pub mod snapshot;
 pub mod spec_ops;
 pub mod task_ops;
 pub mod time_tracking;
