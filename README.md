@@ -1,133 +1,130 @@
 # tasknotes-tui
 
-A fast terminal UI for TaskNotes-style markdown tasks, built in Rust on top of `mdbase-rs`.
+A terminal interface for managing markdown-based tasks. Built in Rust on top of [mdbase-rs](https://github.com/anthropics/mdbase-rs), compliant with the [TaskNotes spec](https://github.com/anthropics/tasknotes-spec).
 
-## Architecture
-
-- `src/repository.rs`: storage adapter on top of `mdbase-rs`
-- `src/app.rs`: application state and user actions
-- `src/ui.rs`: `ratatui` rendering and keyboard handling
-- `src/spec_ops.rs`: TaskNotes-spec bridge surface
-- `js/tasknotes-spec-adapter.mjs`: JS adapter for the TaskNotes-spec runner
-
-The interactive TUI uses `mdbase-rs` for collection reads and writes. The repo also includes three conformance paths:
-
-- `npm run conformance:test`: runs the TaskNotes-spec suite against this repo's adapter
-- `npm run conformance:test:rust`: runs the same suite through the local Rust bridge
-- `npm run conformance:test:reference`: runs the suite against the sibling `mdbase-tasknotes` reference implementation
-
-`mdbase-tasknotes` is not part of the TUI runtime. It is only used in the conformance harness as a sibling reference implementation.
-
-## Run
-
-```bash
-cargo run --bin tasknotes-tui -- --root /path/to/vault
-cargo run --bin tasknotes-tui -- --root /path/to/vault --focus-date 2026-03-29
-cargo run --bin tasknotes-tui -- print-default-config
-cargo run --bin tasknotes-tui -- --root /path/to/vault render-snapshot --width 120 --height 32
-cargo run --bin tasknotes-tui -- --root docs/demo-vault seed-demo-vault
-```
-
-The target vault must be readable by `mdbase-rs`, which means it should contain `mdbase.yaml` and a task type definition.
-
-The TUI reads an optional vault-specific `tasknotes-tui.yaml` from that same root. Keeping it in the vault root is the right default for this project: views and keybinds are part of how you work with a specific vault, not global machine state.
+Tasks live as markdown files with YAML frontmatter in your vault. The TUI reads and writes them directly — no database, no sync service.
 
 ## Install
 
-For local development:
-
-```bash
-cargo run --bin tasknotes-tui -- --root /path/to/vault
-```
-
-For direct install from git:
+From source:
 
 ```bash
 cargo install --git <repo-url> --bin tasknotes-tui
 ```
 
-GitHub Releases can also ship prebuilt archives for:
+Prebuilt binaries for Linux x86_64, macOS (Intel and Apple Silicon), and Windows are attached to GitHub Releases.
 
-- Linux x86_64
-- macOS x86_64
-- macOS Apple Silicon
-- Windows x86_64
+## Setup
 
-A release workflow is included at [`.github/workflows/release.yml`](/home/calluma/projects/tasknotes-tui/.github/workflows/release.yml). Tagging a release like `v0.1.0` will build platform archives and attach them to the GitHub Release.
+Your vault needs an `mdbase.yaml` and a task type definition. If you already have a TaskNotes-compatible vault, point the TUI at it:
 
-The runtime reads the vault-root `tasknotes.yaml` TaskNotes-spec config for field mapping, defaults, archive behavior, and related task behavior. Task membership comes from the `mdbase` type definition.
-
-## Keys
-
-- `Ctrl-P`: open fuzzy command palette
-- `h` / `l` or left/right: move focused date by one day
-- `PgUp` / `PgDn`: move focused date by one week
-- `g`: jump focused date to today
-- `j` / `k` or up/down: move
-- `1`: open tasks
-- `2`: date filter for the focused day
-- `3`: overdue
-- `4`: all
-- `5`: tracked
-- `6`: archived
-- `/`: search
-- `x` or `space`: toggle completion
-- `z`: archive or restore the selected task
-- `T`: start/stop time tracking on the selected task
-- `S`: skip/unskip today's recurring instance
-- `n`: create task
-- `c`: quick create for the focused date
-- `e`: edit title
-- `i`: open selected task in `$EDITOR`
-- `d`: edit due date
-- `s`: edit scheduled date
-- `p`: edit priority
-- `t`: edit status
-- `R`: edit recurrence rule
-- `A`: edit recurrence anchor
-- `r`: refresh
-- `q`: quit
-
-## Command Palette
-
-`Ctrl-P` opens a modal command panel with fuzzy filtering, keyboard navigation, and inline help. It exposes configured view slots from `tasknotes-tui.yaml` alongside editing actions, creation, refresh, completion toggling, archive toggling, and recurring skip actions.
-
-Archiving marks tasks with the configured archive tag and field, and can also move files into the configured archive folder.
-
-Archive semantics are configurable in `tasknotes.yaml`:
-
-```yaml
-archive:
-  move_on_archive: false
-  folder: "TaskNotes/Archive"
-  tag: "archived"
-  field: "archived"
+```bash
+tasknotes-tui --root /path/to/vault
 ```
 
-`tag` and `field` control what the TUI writes and what it considers archived in views and filtering.
+The TUI reads two config files from the vault root:
 
-Task membership is defined by the `mdbase` task type. Files outside that type are not shown as tasks.
+- **`tasknotes.yaml`** — TaskNotes spec config: field mapping, defaults, archive behavior, status values.
+- **`tasknotes-tui.yaml`** (optional) — TUI-specific config: keybinds and view slots.
 
-Task body editing uses your external editor.
-
-## Time Tracking
-
-- `T`: toggle tracking for the selected task
-- `5`: show tasks with an active timer
-
-Tracked tasks are marked in the list and show `Tracking: active` in the details pane.
-
-## TUI Config
-
-`tasknotes-tui.yaml` lets you configure keybinds and up to 9 privileged view slots for the number keys.
-
-To print the exact default config:
+To see the default TUI config:
 
 ```bash
 tasknotes-tui print-default-config
 ```
 
-Example:
+## Usage
+
+### Views
+
+Number keys `1`–`9` switch between configured view slots. The defaults:
+
+| Key | View | Shows |
+|-----|------|-------|
+| `1` | Inbox | Open tasks |
+| `2` | Today | Tasks for the focused date |
+| `3` | Doing | Tasks with status "doing" |
+| `4` | Overdue | Past-due tasks |
+| `5` | Tracked | Tasks with an active timer |
+| `6` | Archived | Archived tasks |
+| `7` | All | Everything |
+
+### Calendar
+
+A mini calendar sits in the top pane. The highlighted day is the focused date, and days with tasks are marked.
+
+- `h` / `l` or arrow keys — move by day
+- `PgUp` / `PgDn` — move by week
+- `g` — jump to today
+
+When the date view (`2`) is active, the task list shows tasks for the focused date.
+
+### Working with tasks
+
+| Key | Action |
+|-----|--------|
+| `x` or `Space` | Toggle completion |
+| `z` | Archive / restore |
+| `T` | Start / stop time tracking |
+| `S` | Skip / unskip a recurring instance |
+| `n` | Create task (multi-step: title, dates, priority, status, recurrence) |
+| `c` | Quick create (title only, scheduled to focused date) |
+| `e` | Edit title |
+| `i` | Open in `$EDITOR` |
+| `d` | Edit due date |
+| `s` | Edit scheduled date |
+| `p` | Edit priority |
+| `t` | Edit status |
+| `R` | Edit recurrence rule |
+| `A` | Edit recurrence anchor |
+
+### Date picker
+
+When editing due or scheduled dates, a date picker opens:
+
+- Arrow keys or `h`/`l` — move by day
+- `j`/`k` — move by week
+- `H`/`L` — move by month
+- `t` — jump to today
+- `c` — clear the value
+- `/` — switch to manual `YYYY-MM-DD` entry
+- `Enter` — save
+
+### Command palette
+
+`Ctrl-P` opens a fuzzy-filterable command palette with all available actions.
+
+### Search
+
+`/` opens live search across tasks.
+
+## Configuration
+
+### Views
+
+Views are configured in `tasknotes-tui.yaml` under the `views` key. Built-in view kinds:
+
+- `all`, `open`, `date`, `overdue`, `tracked`, `archived`
+- `status` — filter by a status value
+- `expression` — filter using mdbase expression syntax
+
+Expression views have access to task fields (`status`, `priority`, `due`, `scheduled`, etc.) and special variables (`focusDate`, `today`, `isCompleted`, `isTracked`, `isArchived`, `path`).
+
+```yaml
+views:
+  6:
+    label: "Doing Today"
+    kind: "expression"
+    expression: 'status == "doing" && (scheduled == focusDate || due == focusDate)'
+  7:
+    label: "Tracked Work"
+    kind: "expression"
+    where: "isTracked && !isCompleted"
+```
+
+### Keybinds
+
+Keybinds map keys to commands. Multiple keys can map to the same command.
 
 ```yaml
 keybinds:
@@ -137,144 +134,53 @@ keybinds:
   i: open_in_editor
   shift-t: toggle_time_tracking
   h: focus_prev_day
-  left: focus_prev_day
   l: focus_next_day
-  right: focus_next_day
-
-views:
-  1:
-    label: "Inbox"
-    kind: "open"
-  2:
-    label: "Today"
-    kind: "date"
-  3:
-    label: "Doing"
-    kind: "status"
-    value: "doing"
-  4:
-    label: "Overdue"
-    kind: "overdue"
-  5:
-    label: "Tracked"
-    kind: "tracked"
-  6:
-    label: "Archived"
-    kind: "archived"
-  7:
-    label: "All"
-    kind: "all"
 ```
 
-The keybind table is `key -> command`. Multiple keys can point at the same command.
+### Archive
 
-Supported view kinds:
-
-- `all`
-- `open`
-- `date`
-- `overdue`
-- `tracked`
-- `archived`
-- `status` with `value`
-- `expression` with `expression`, `where`, or `value`
-
-Number keys `1` through `9` always activate the corresponding configured slot when present.
-
-Expression views use the `mdbase` expression syntax and are evaluated against the in-memory task cache, so view switching stays fast after a reload. Example:
+Archive behavior is configured in `tasknotes.yaml`:
 
 ```yaml
-views:
-  6:
-    label: "Doing Today"
-    kind: "expression"
-    expression: "status == \"doing\" && (scheduled == focusDate || due == focusDate)"
-  7:
-    label: "Tracked Work"
-    kind: "expression"
-    where: "isTracked && !isCompleted"
+archive:
+  move_on_archive: false
+  folder: "TaskNotes/Archive"
+  tag: "archived"
+  field: "archived"
 ```
 
-Available expression context includes normal normalized task fields like `status`, `priority`, `due`, `scheduled`, `timeEntries`, plus:
+## Time tracking
 
-- `focusDate`: the currently focused calendar date
-- `today`: today’s local date
-- `isCompleted`: boolean derived from TaskNotes completed-status rules
-- `isTracked`: boolean for an active time entry
-- `isArchived`: boolean for archive state
-- `path`: the task path
-- `file.*`: `mdbase` file helpers such as `file.path`, `file.body`, tags, links, and related expression helpers
+`T` starts or stops a timer on the selected task. Active timers show in the task list and detail pane. View `5` (Tracked) shows all tasks with a running timer.
 
-## Calendar
+## Recurring tasks
 
-The top context pane includes a mini monthly calendar. The highlighted day is the focused date, and dates with tasks are marked with `*`.
+Tasks can have recurrence rules (RRULE syntax) with an anchor of either `scheduled` or `completion`. `S` skips the current instance without completing it.
 
-When the date view is active with `2`, the task list shows tasks for the focused date. Use `h`/`l`, left/right, `PgUp`/`PgDn`, or `g` to move around the calendar.
-
-## Snapshots And Recordings
-
-For deterministic debugging and documentation capture, the CLI supports both a fixed initial focus date and a snapshot render mode.
-
-Render a single frame of the TUI to stdout:
+## Development
 
 ```bash
-cargo run --bin tasknotes-tui -- \
-  --root docs/demo-vault \
-  --focus-date 2026-03-29 \
+cargo run --bin tasknotes-tui -- --root /path/to/vault
+cargo run --bin tasknotes-tui -- --root /path/to/vault --focus-date 2026-03-29
+```
+
+### Demo vault
+
+```bash
+# Seed sample data
+tasknotes-tui --root docs/demo-vault seed-demo-vault
+
+# Render a snapshot to stdout
+tasknotes-tui --root docs/demo-vault --focus-date 2026-03-29 \
   render-snapshot --width 120 --height 32
 ```
 
-The repo also includes a demo vault skeleton at [docs/demo-vault](/home/calluma/projects/tasknotes-tui/docs/demo-vault) plus `vhs` tapes in [docs/vhs](/home/calluma/projects/tasknotes-tui/docs/vhs). Seed the sample data before capturing:
+### Conformance testing
+
+The repo includes adapters for running the TaskNotes spec test suite:
 
 ```bash
-cargo run --bin tasknotes-tui -- --root docs/demo-vault seed-demo-vault
+npm run conformance:test
+npm run conformance:test:rust
+npm run conformance:test:reference   # against the mdbase-tasknotes reference impl
 ```
-
-Useful commands:
-
-```bash
-npm run docs:seed-demo-vault
-npm run docs:snapshot
-npm run docs:vhs:overview
-npm run docs:vhs:workflow
-```
-
-These expect `vhs` to be installed locally for the GIF captures.
-
-## Date Editing
-
-Due and scheduled dates are edited through a date picker.
-
-- arrows or `h`/`l`: move by day
-- `j`/`k`: move by week
-- `H`/`L`: move by month
-- `t`: jump to today
-- `c`: clear the value
-- `/`: switch to manual `YYYY-MM-DD` entry
-- `Enter`: save
-
-## Create Flow
-
-`n` opens a multi-step draft flow:
-
-- title
-- details
-- due date
-- scheduled date
-- priority
-- status
-- recurrence rule
-- recurrence anchor
-
-Blank values skip optional fields.
-
-## Quick Create
-
-`c` opens a title-only quick create prompt.
-
-- title comes from the prompt
-- `scheduled` is set to the currently focused date
-- status and priority use vault defaults
-- details/body stays empty
-
-Quick create is the fast capture path for calendar-driven planning.
