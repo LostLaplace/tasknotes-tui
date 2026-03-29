@@ -7,5 +7,7 @@ pub mod recurrence;
 pub mod repository;
 pub mod spec_ops;
 pub mod time_tracking;
+pub mod tui_config;
 pub mod ui;
 pub mod validation;
+pub mod view_query;

@@ -28,11 +28,21 @@ pub struct DefaultsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskDetectionConfig {
     pub method: String,
+    pub methods: Vec<String>,
+    pub combine: String,
     pub tag: String,
     pub property_name: Option<String>,
     pub property_value: Option<String>,
     pub default_folder: String,
     pub excluded_folders: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchiveConfig {
+    pub move_on_archive: bool,
+    pub folder: String,
+    pub tag: String,
+    pub field: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +53,7 @@ pub struct EffectiveConfig {
     pub status: StatusConfig,
     pub defaults: DefaultsConfig,
     pub task_detection: TaskDetectionConfig,
+    pub archive: ArchiveConfig,
 }
 
 impl Default for EffectiveConfig {
@@ -87,11 +98,19 @@ impl Default for EffectiveConfig {
             },
             task_detection: TaskDetectionConfig {
                 method: "tag".into(),
+                methods: vec!["tag".into()],
+                combine: "or".into(),
                 tag: "task".into(),
                 property_name: None,
                 property_value: None,
                 default_folder: "TaskNotes/Tasks".into(),
                 excluded_folders: Vec::new(),
+            },
+            archive: ArchiveConfig {
+                move_on_archive: false,
+                folder: "TaskNotes/Archive".into(),
+                tag: "archived".into(),
+                field: "archived".into(),
             },
         }
     }
@@ -205,6 +224,20 @@ pub fn map_tasknotes_plugin_config(data: &Value) -> Value {
         out.insert("title".into(), Value::Object(title));
     }
 
+    if let Some(defaults) = source
+        .get("taskCreationDefaults")
+        .and_then(Value::as_object)
+    {
+        let mut templating = Map::new();
+        if let Some(value) = defaults.get("useBodyTemplate").and_then(Value::as_bool) {
+            templating.insert("enabled".into(), Value::Bool(value));
+        }
+        if let Some(value) = defaults.get("bodyTemplate").and_then(Value::as_str) {
+            templating.insert("template_path".into(), Value::String(value.to_string()));
+        }
+        out.insert("templating".into(), Value::Object(templating));
+    }
+
     if let Some(statuses) = source.get("customStatuses").and_then(Value::as_array) {
         let values: Vec<Value> = statuses
             .iter()
@@ -266,6 +299,60 @@ pub fn map_tasknotes_plugin_config(data: &Value) -> Value {
         out.insert("task_detection".into(), Value::Object(detection));
     }
 
+    if source.contains_key("autoStopTimeTrackingOnComplete")
+        || source.contains_key("autoStopTimeTrackingNotification")
+    {
+        let mut time_tracking = Map::new();
+        if let Some(value) = source
+            .get("autoStopTimeTrackingOnComplete")
+            .and_then(Value::as_bool)
+        {
+            time_tracking.insert("auto_stop_on_complete".into(), Value::Bool(value));
+        }
+        if let Some(value) = source
+            .get("autoStopTimeTrackingNotification")
+            .and_then(Value::as_bool)
+        {
+            time_tracking.insert("auto_stop_notification".into(), Value::Bool(value));
+        }
+        out.insert("time_tracking".into(), Value::Object(time_tracking));
+    }
+
+    if source.contains_key("tasksFolder") || source.contains_key("excludedFolders") {
+        let mut task_detection = out
+            .get("task_detection")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(value) = source.get("tasksFolder").and_then(Value::as_str) {
+            task_detection.insert("default_folder".into(), Value::String(value.to_string()));
+        }
+        if let Some(value) = source.get("excludedFolders") {
+            task_detection.insert("excluded_folders".into(), value.clone());
+        }
+        if !task_detection.is_empty() {
+            out.insert("task_detection".into(), Value::Object(task_detection));
+        }
+    }
+
+    if source.contains_key("moveArchivedTasks") || source.contains_key("archiveFolder") {
+        let mut archive = Map::new();
+        if let Some(value) = source.get("moveArchivedTasks").and_then(Value::as_bool) {
+            archive.insert("move_on_archive".into(), Value::Bool(value));
+        }
+        if let Some(value) = source.get("archiveFolder").and_then(Value::as_str) {
+            archive.insert("folder".into(), Value::String(value.to_string()));
+        }
+        out.insert("archive".into(), Value::Object(archive));
+    }
+
+    if let Some(value) = source
+        .get("useFrontmatterMarkdownLinks")
+        .and_then(Value::as_bool)
+    {
+        out.insert("links".into(), json!({ "use_markdown_format": value }));
+    }
+
     Value::Object(out)
 }
 
@@ -315,7 +402,10 @@ pub fn provider_behavior(input: &Value) -> anyhow::Result<Value> {
 }
 
 pub fn validate_schema(input: &Value) -> anyhow::Result<Value> {
-    let kind = input.get("kind").and_then(Value::as_str).unwrap_or_default();
+    let kind = input
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let value = input
         .get("value")
         .and_then(Value::as_object)
@@ -419,16 +509,27 @@ pub fn validate_schema(input: &Value) -> anyhow::Result<Value> {
                 );
             }
         }
+        "archive" => {
+            if let Some(flag) = value.get("move_on_archive") {
+                anyhow::ensure!(flag.is_boolean(), "archive.move_on_archive invalid");
+            }
+            if let Some(folder) = value.get("folder").and_then(Value::as_str) {
+                anyhow::ensure!(!folder.trim().is_empty(), "archive.folder invalid");
+            }
+            if let Some(tag) = value.get("tag").and_then(Value::as_str) {
+                anyhow::ensure!(!tag.trim().is_empty(), "archive.tag invalid");
+            }
+            if let Some(field) = value.get("field").and_then(Value::as_str) {
+                anyhow::ensure!(!field.trim().is_empty(), "archive.field invalid");
+            }
+        }
         "status" => {
             let values = value
                 .get("values")
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            anyhow::ensure!(
-                values.iter().all(Value::is_string),
-                "status.values invalid"
-            );
+            anyhow::ensure!(values.iter().all(Value::is_string), "status.values invalid");
             let values: Vec<String> = values
                 .iter()
                 .filter_map(Value::as_str)
@@ -444,10 +545,7 @@ pub fn validate_schema(input: &Value) -> anyhow::Result<Value> {
                 let array = completed_values
                     .as_array()
                     .ok_or_else(|| anyhow::anyhow!("status.completed_values non-empty"))?;
-                anyhow::ensure!(
-                    !array.is_empty(),
-                    "status.completed_values non-empty"
-                );
+                anyhow::ensure!(!array.is_empty(), "status.completed_values non-empty");
                 anyhow::ensure!(
                     array.iter().all(Value::is_string),
                     "status.completed_values invalid"
@@ -475,15 +573,14 @@ pub fn validate_schema(input: &Value) -> anyhow::Result<Value> {
                 anyhow::ensure!(
                     matches!(
                         kind,
-                        "FINISHTOSTART"
-                            | "STARTTOSTART"
-                            | "FINISHTOFINISH"
-                            | "STARTTOFINISH"
+                        "FINISHTOSTART" | "STARTTOSTART" | "FINISHTOFINISH" | "STARTTOFINISH"
                     ),
                     "dependencies.default_reltype invalid"
                 );
             }
-            if let Some(severity) = value.get("unresolved_target_severity").and_then(Value::as_str)
+            if let Some(severity) = value
+                .get("unresolved_target_severity")
+                .and_then(Value::as_str)
             {
                 anyhow::ensure!(
                     severity == "warning" || severity == "error",
@@ -573,6 +670,20 @@ pub fn normalize_effective_config(config_value: Value) -> EffectiveConfig {
     if let Some(detection) = obj.get("task_detection").and_then(Value::as_object) {
         if let Some(method) = detection.get("method").and_then(Value::as_str) {
             config.task_detection.method = method.to_string();
+            config.task_detection.methods = vec![method.to_string()];
+        }
+        if let Some(methods) = detection.get("methods").and_then(Value::as_array) {
+            let parsed: Vec<String> = methods
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+            if !parsed.is_empty() {
+                config.task_detection.methods = parsed;
+            }
+        }
+        if let Some(combine) = detection.get("combine").and_then(Value::as_str) {
+            config.task_detection.combine = combine.to_string();
         }
         if let Some(tag) = detection.get("tag").and_then(Value::as_str) {
             config.task_detection.tag = tag.to_string();
@@ -603,6 +714,20 @@ pub fn normalize_effective_config(config_value: Value) -> EffectiveConfig {
                     .collect(),
                 _ => Vec::new(),
             };
+        }
+    }
+    if let Some(archive) = obj.get("archive").and_then(Value::as_object) {
+        if let Some(value) = archive.get("move_on_archive").and_then(Value::as_bool) {
+            config.archive.move_on_archive = value;
+        }
+        if let Some(value) = archive.get("folder").and_then(Value::as_str) {
+            config.archive.folder = value.to_string();
+        }
+        if let Some(value) = archive.get("tag").and_then(Value::as_str) {
+            config.archive.tag = value.to_string();
+        }
+        if let Some(value) = archive.get("field").and_then(Value::as_str) {
+            config.archive.field = value.to_string();
         }
     }
 
@@ -652,43 +777,61 @@ pub fn detect_task_file(
         return false;
     }
 
-    match config.method.as_str() {
-        "property" => {
-            let Some(name) = config.property_name.as_ref() else {
-                return false;
-            };
-            let Some(value) = frontmatter.get(name) else {
-                return false;
-            };
-            match config.property_value.as_deref() {
-                Some(expected) if !expected.is_empty() => value
-                    .as_str()
-                    .map(|actual| actual == expected)
-                    .unwrap_or(false),
-                _ => true,
-            }
+    let property_matches = || {
+        let Some(name) = config.property_name.as_ref() else {
+            return false;
+        };
+        let Some(value) = frontmatter.get(name) else {
+            return false;
+        };
+        match config.property_value.as_deref() {
+            Some(expected) if !expected.is_empty() => value
+                .as_str()
+                .map(|actual| actual == expected)
+                .unwrap_or(false),
+            _ => true,
         }
-        _ => {
-            let normalized_tag = normalize_hashtag_value(&config.tag);
-            let frontmatter_hit = match frontmatter.get("tags") {
-                Some(Value::Array(tags)) => tags
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .any(|entry| normalize_hashtag_value(entry) == normalized_tag),
-                Some(Value::String(tag)) => normalize_hashtag_value(tag) == normalized_tag,
-                _ => false,
-            };
-            if frontmatter_hit {
-                return true;
-            }
-            let body = strip_code_spans_and_fences(body);
-            let hashtag =
-                regex::Regex::new(r"(^|[^\w])#([A-Za-z0-9][A-Za-z0-9/_-]*)").expect("valid regex");
-            let matched = hashtag
-                .captures_iter(&body)
-                .filter_map(|caps| caps.get(2))
-                .any(|m| m.as_str().eq_ignore_ascii_case(&normalized_tag));
-            matched
+    };
+
+    let tag_matches = || {
+        let normalized_tag = normalize_hashtag_value(&config.tag);
+        let frontmatter_hit = match frontmatter.get("tags") {
+            Some(Value::Array(tags)) => tags
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|entry| normalize_hashtag_value(entry) == normalized_tag),
+            Some(Value::String(tag)) => normalize_hashtag_value(tag) == normalized_tag,
+            _ => false,
+        };
+        if frontmatter_hit {
+            return true;
         }
+        let body = strip_code_spans_and_fences(body);
+        let hashtag =
+            regex::Regex::new(r"(^|[^\w])#([A-Za-z0-9][A-Za-z0-9/_-]*)").expect("valid regex");
+        let matched = hashtag
+            .captures_iter(&body)
+            .filter_map(|caps| caps.get(2))
+            .any(|m| m.as_str().eq_ignore_ascii_case(&normalized_tag));
+        matched
+    };
+
+    let methods = if config.methods.is_empty() {
+        vec![config.method.as_str()]
+    } else {
+        config.methods.iter().map(String::as_str).collect()
+    };
+    let results: Vec<bool> = methods
+        .into_iter()
+        .map(|method| match method {
+            "property" => property_matches(),
+            _ => tag_matches(),
+        })
+        .collect();
+
+    if config.combine.eq_ignore_ascii_case("and") {
+        results.into_iter().all(|value| value)
+    } else {
+        results.into_iter().any(|value| value)
     }
 }

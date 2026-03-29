@@ -1,10 +1,10 @@
 use anyhow::Result;
+use std::collections::BTreeMap;
 
-use crate::date::{
-    apply_day_offset, apply_month_offset, get_date_part, is_before_date_safe, today_local,
-};
-use crate::field_mapping::is_completed_status;
+use crate::date::{apply_day_offset, apply_month_offset, get_date_part, today_local};
 use crate::repository::{TaskDraft, TaskFilter, TaskRecord, TaskRepository};
+use crate::tui_config::{TuiConfig, ViewConfig, ViewFilter};
+use crate::view_query::{compile_view_filters, CompiledViewFilter, ViewEvalSupport};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -34,10 +34,13 @@ pub enum InputMode {
 
 pub struct App {
     pub repo: TaskRepository,
+    pub tui_config: TuiConfig,
+    pub compiled_views: BTreeMap<u8, CompiledViewFilter>,
+    pub view_eval_support: Option<ViewEvalSupport>,
     pub all_tasks: Vec<TaskRecord>,
     pub tasks: Vec<TaskRecord>,
     pub selected: usize,
-    pub filter: TaskFilter,
+    pub current_view_slot: u8,
     pub status: String,
     pub search_query: String,
     pub input_mode: InputMode,
@@ -57,13 +60,10 @@ pub enum PaletteCommand {
     Search,
     Refresh,
     ToggleComplete,
+    ToggleArchive,
     ToggleTimeTracking,
     ToggleRecurringSkip,
-    FilterOpen,
-    FilterToday,
-    FilterOverdue,
-    FilterAll,
-    FilterTracked,
+    ViewSlot(u8),
     EditTitle,
     OpenInEditor,
     EditDue,
@@ -76,136 +76,134 @@ pub enum PaletteCommand {
 
 pub struct PaletteItem {
     pub command: PaletteCommand,
-    pub title: &'static str,
-    pub aliases: &'static [&'static str],
-    pub description: &'static str,
+    pub title: String,
+    pub aliases: Vec<String>,
+    pub description: String,
+    pub hotkey: Option<String>,
 }
 
-const PALETTE_ITEMS: &[PaletteItem] = &[
-    PaletteItem {
-        command: PaletteCommand::CreateTask,
-        title: "Create task",
-        aliases: &["new", "n", "add"],
-        description: "Start the multi-step task creation flow",
-    },
-    PaletteItem {
-        command: PaletteCommand::Search,
-        title: "Search tasks",
-        aliases: &["find", "/"],
-        description: "Open live task search",
-    },
-    PaletteItem {
-        command: PaletteCommand::Refresh,
-        title: "Refresh list",
-        aliases: &["reload", "r"],
-        description: "Reload tasks from disk",
-    },
-    PaletteItem {
-        command: PaletteCommand::ToggleComplete,
-        title: "Toggle completion",
-        aliases: &["complete", "done", "x"],
-        description: "Complete or reopen the selected task",
-    },
-    PaletteItem {
-        command: PaletteCommand::ToggleTimeTracking,
-        title: "Toggle time tracking",
-        aliases: &["track", "timer", "T"],
-        description: "Start or stop time tracking on the selected task",
-    },
-    PaletteItem {
-        command: PaletteCommand::ToggleRecurringSkip,
-        title: "Toggle recurring skip today",
-        aliases: &["skip", "recurring", "S"],
-        description: "Skip or unskip today's recurring instance",
-    },
-    PaletteItem {
-        command: PaletteCommand::FilterOpen,
-        title: "Filter: Open",
-        aliases: &["open", "1"],
-        description: "Show open tasks",
-    },
-    PaletteItem {
-        command: PaletteCommand::FilterToday,
-        title: "Filter: Today",
-        aliases: &["today", "2"],
-        description: "Show tasks due or scheduled today",
-    },
-    PaletteItem {
-        command: PaletteCommand::FilterOverdue,
-        title: "Filter: Overdue",
-        aliases: &["overdue", "3"],
-        description: "Show overdue tasks",
-    },
-    PaletteItem {
-        command: PaletteCommand::FilterAll,
-        title: "Filter: All",
-        aliases: &["all", "4"],
-        description: "Show all tasks",
-    },
-    PaletteItem {
-        command: PaletteCommand::FilterTracked,
-        title: "Filter: Tracked",
-        aliases: &["tracked", "active", "5"],
-        description: "Show tasks with an active time entry",
-    },
-    PaletteItem {
-        command: PaletteCommand::EditTitle,
-        title: "Edit title",
-        aliases: &["rename", "e"],
-        description: "Edit the selected task title",
-    },
-    PaletteItem {
-        command: PaletteCommand::OpenInEditor,
-        title: "Open in editor",
-        aliases: &["edit", "body", "notes", "i"],
-        description: "Open the selected task in $EDITOR",
-    },
-    PaletteItem {
-        command: PaletteCommand::EditDue,
-        title: "Edit due date",
-        aliases: &["due", "d"],
-        description: "Edit the selected task due date",
-    },
-    PaletteItem {
-        command: PaletteCommand::EditScheduled,
-        title: "Edit scheduled date",
-        aliases: &["scheduled", "s"],
-        description: "Edit the selected task scheduled date",
-    },
-    PaletteItem {
-        command: PaletteCommand::EditPriority,
-        title: "Edit priority",
-        aliases: &["priority", "p"],
-        description: "Edit the selected task priority",
-    },
-    PaletteItem {
-        command: PaletteCommand::EditStatus,
-        title: "Edit status",
-        aliases: &["status", "t"],
-        description: "Edit the selected task status",
-    },
-    PaletteItem {
-        command: PaletteCommand::EditRecurrence,
-        title: "Edit recurrence rule",
-        aliases: &["recurrence", "rrule", "R"],
-        description: "Edit the selected task recurrence rule",
-    },
-    PaletteItem {
-        command: PaletteCommand::EditRecurrenceAnchor,
-        title: "Edit recurrence anchor",
-        aliases: &["anchor", "A"],
-        description: "Edit the selected task recurrence anchor",
-    },
-];
+fn static_palette_items() -> Vec<PaletteItem> {
+    vec![
+        PaletteItem {
+            command: PaletteCommand::CreateTask,
+            title: "Create task".into(),
+            aliases: vec!["new".into(), "n".into(), "add".into()],
+            description: "Start the multi-step task creation flow".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::Search,
+            title: "Search tasks".into(),
+            aliases: vec!["find".into(), "/".into()],
+            description: "Open live task search".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::Refresh,
+            title: "Refresh list".into(),
+            aliases: vec!["reload".into(), "r".into()],
+            description: "Reload tasks from disk".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::ToggleComplete,
+            title: "Toggle completion".into(),
+            aliases: vec!["complete".into(), "done".into(), "x".into()],
+            description: "Complete or reopen the selected task".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::ToggleArchive,
+            title: "Toggle archive".into(),
+            aliases: vec!["archive".into(), "unarchive".into(), "z".into()],
+            description: "Archive or restore the selected task".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::ToggleTimeTracking,
+            title: "Toggle time tracking".into(),
+            aliases: vec!["track".into(), "timer".into(), "T".into()],
+            description: "Start or stop time tracking on the selected task".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::ToggleRecurringSkip,
+            title: "Toggle recurring skip today".into(),
+            aliases: vec!["skip".into(), "recurring".into(), "S".into()],
+            description: "Skip or unskip today's recurring instance".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::EditTitle,
+            title: "Edit title".into(),
+            aliases: vec!["rename".into(), "e".into()],
+            description: "Edit the selected task title".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::OpenInEditor,
+            title: "Open in editor".into(),
+            aliases: vec!["edit".into(), "body".into(), "notes".into(), "i".into()],
+            description: "Open the selected task in $EDITOR".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::EditDue,
+            title: "Edit due date".into(),
+            aliases: vec!["due".into(), "d".into()],
+            description: "Edit the selected task due date".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::EditScheduled,
+            title: "Edit scheduled date".into(),
+            aliases: vec!["scheduled".into(), "s".into()],
+            description: "Edit the selected task scheduled date".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::EditPriority,
+            title: "Edit priority".into(),
+            aliases: vec!["priority".into(), "p".into()],
+            description: "Edit the selected task priority".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::EditStatus,
+            title: "Edit status".into(),
+            aliases: vec!["status".into(), "t".into()],
+            description: "Edit the selected task status".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::EditRecurrence,
+            title: "Edit recurrence rule".into(),
+            aliases: vec!["recurrence".into(), "rrule".into(), "R".into()],
+            description: "Edit the selected task recurrence rule".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::EditRecurrenceAnchor,
+            title: "Edit recurrence anchor".into(),
+            aliases: vec!["anchor".into(), "A".into()],
+            description: "Edit the selected task recurrence anchor".into(),
+            hotkey: None,
+        },
+    ]
+}
 
 impl App {
-    pub fn new(repo: TaskRepository) -> Result<Self> {
+    pub fn new(repo: TaskRepository, tui_config: TuiConfig) -> Result<Self> {
+        let initial_view_slot = tui_config.views.keys().next().copied().unwrap_or(1);
         let mut app = Self {
             repo,
+            compiled_views: compile_view_filters(&tui_config.views),
+            tui_config,
+            view_eval_support: None,
             all_tasks: Vec::new(),
             tasks: Vec::new(),
             selected: 0,
-            filter: TaskFilter::Open,
+            current_view_slot: initial_view_slot,
             status: String::new(),
             search_query: String::new(),
             input_mode: InputMode::None,
@@ -229,6 +227,7 @@ impl App {
 
     pub fn reload_from_disk(&mut self) -> Result<()> {
         self.all_tasks = self.repo.list_tasks(TaskFilter::All, &self.focus_date)?;
+        self.view_eval_support = Some(self.repo.build_view_eval_support()?);
         self.calendar_tasks = self.all_tasks.clone();
         self.apply_filters();
         Ok(())
@@ -247,14 +246,24 @@ impl App {
         } else if self.tasks.is_empty() {
             self.selected = 0;
         }
+        if let Some(error) = self.current_view_error() {
+            self.status = format!("View {} invalid: {}", self.current_view_slot, error);
+            return;
+        }
         self.status = if self.search_query.trim().is_empty() {
-            if matches!(self.filter, TaskFilter::Today | TaskFilter::Overdue) {
+            if matches!(
+                self.current_view().map(|view| &view.filter),
+                Some(ViewFilter::Date | ViewFilter::Overdue | ViewFilter::Expression { .. })
+            ) {
                 format!("{} tasks for {}", self.tasks.len(), self.focus_date)
             } else {
                 format!("{} tasks", self.tasks.len())
             }
         } else {
-            if matches!(self.filter, TaskFilter::Today | TaskFilter::Overdue) {
+            if matches!(
+                self.current_view().map(|view| &view.filter),
+                Some(ViewFilter::Date | ViewFilter::Overdue)
+            ) {
                 format!(
                     "{} tasks for {} matching '{}'",
                     self.tasks.len(),
@@ -288,12 +297,29 @@ impl App {
         }
     }
 
-    pub fn set_filter(&mut self, filter: TaskFilter) -> Result<()> {
-        self.filter = filter;
-        if filter == TaskFilter::Today {
-            self.focus_date = today_local();
+    pub fn activate_view_slot(&mut self, slot: u8) -> Result<()> {
+        if self.tui_config.views.contains_key(&slot) {
+            self.current_view_slot = slot;
+            if matches!(
+                self.current_view().map(|view| &view.filter),
+                Some(ViewFilter::Date)
+            ) {
+                self.focus_date = today_local();
+            }
+            self.refresh()?;
+            if let Some(error) = self.current_view_error() {
+                self.status = format!("View {} invalid: {}", slot, error);
+            } else {
+                self.status = format!(
+                    "View {}: {}",
+                    slot,
+                    self.current_view()
+                        .map(|view| view.label.as_str())
+                        .unwrap_or("Unknown")
+                );
+            }
         }
-        self.refresh()
+        Ok(())
     }
 
     pub fn move_focus_date(&mut self, offset_days: i64) -> Result<()> {
@@ -311,17 +337,32 @@ impl App {
 
     pub fn toggle_selected(&mut self) -> Result<()> {
         if let Some(task) = self.selected_task().cloned() {
-            self.repo.toggle_complete(&task)?;
-            self.reload_from_disk()?;
+            let updated = self.repo.toggle_complete(&task)?;
+            self.replace_cached_task(&task.path, updated);
             self.status = format!("Updated {}", task.title);
+        }
+        Ok(())
+    }
+
+    pub fn toggle_selected_archive(&mut self) -> Result<()> {
+        if let Some(task) = self.selected_task().cloned() {
+            let was_archived =
+                crate::repository::is_archived_task(&task, &self.repo.config.archive);
+            let updated = self.repo.toggle_archive(&task)?;
+            self.replace_cached_task(&task.path, updated);
+            self.status = if was_archived {
+                format!("Restored {}", task.title)
+            } else {
+                format!("Archived {}", task.title)
+            };
         }
         Ok(())
     }
 
     pub fn toggle_selected_time_tracking(&mut self) -> Result<()> {
         if let Some(task) = self.selected_task().cloned() {
-            self.repo.toggle_time_tracking(&task)?;
-            self.reload_from_disk()?;
+            let updated = self.repo.toggle_time_tracking(&task)?;
+            self.replace_cached_task(&task.path, updated);
             self.status = if task.has_active_time_entry {
                 format!("Stopped tracking {}", task.title)
             } else {
@@ -333,8 +374,8 @@ impl App {
 
     pub fn skip_selected_today(&mut self) -> Result<()> {
         if let Some(task) = self.selected_task().cloned() {
-            self.repo.toggle_skip_today(&task)?;
-            self.reload_from_disk()?;
+            let updated = self.repo.toggle_skip_today(&task)?;
+            self.replace_cached_task(&task.path, updated);
             self.status = format!("Updated recurring state for {}", task.title);
         }
         Ok(())
@@ -344,6 +385,43 @@ impl App {
         self.input_mode = InputMode::Search;
         self.input_value = self.search_query.clone();
         self.status = "Search tasks".to_string();
+    }
+
+    fn replace_cached_task(&mut self, old_path: &str, updated: TaskRecord) {
+        let updated_path = updated.path.clone();
+        if let Some(existing) = self.all_tasks.iter_mut().find(|task| task.path == old_path) {
+            *existing = updated;
+        } else {
+            self.all_tasks.push(updated);
+        }
+        self.calendar_tasks = self.all_tasks.clone();
+        self.apply_filters();
+        if let Some(index) = self.tasks.iter().position(|task| task.path == updated_path) {
+            self.selected = index;
+        }
+    }
+
+    fn append_cached_task(&mut self, task: TaskRecord) {
+        let task_path = task.path.clone();
+        self.all_tasks.push(task);
+        self.calendar_tasks = self.all_tasks.clone();
+        self.apply_filters();
+        if let Some(index) = self.tasks.iter().position(|entry| entry.path == task_path) {
+            self.selected = index;
+        }
+    }
+
+    pub fn refresh_selected_task(&mut self) -> Result<()> {
+        let Some(task) = self.selected_task().cloned() else {
+            return Ok(());
+        };
+        match self.repo.read_task(&task.path) {
+            Ok(updated) => {
+                self.replace_cached_task(&task.path, updated);
+                Ok(())
+            }
+            Err(_) => self.reload_from_disk(),
+        }
     }
 
     pub fn begin_command_palette(&mut self) {
@@ -379,8 +457,8 @@ impl App {
     pub fn begin_edit_scheduled(&mut self) {
         if let Some(task) = self.selected_task().cloned() {
             self.begin_date_picker(InputMode::PickEditScheduled, task.scheduled.as_deref());
-            self.status = "Edit scheduled date: arrows move, H/L month, t today, c clear, / type"
-                .to_string();
+            self.status =
+                "Edit scheduled date: arrows move, H/L month, t today, c clear, / type".to_string();
         }
     }
 
@@ -520,21 +598,22 @@ impl App {
             InputMode::PickEditDue => {
                 if let Some(task) = self.selected_task().cloned() {
                     let value = self.current_picker_value();
-                    self.repo.update_date_field(&task, "due", value.as_deref())?;
+                    let updated = self.repo
+                        .update_date_field(&task, "due", value.as_deref())?;
+                    self.replace_cached_task(&task.path, updated);
                     self.input_mode = InputMode::None;
                     self.input_value.clear();
-                    self.reload_from_disk()?;
                     self.status = format!("Updated due date for {}", task.title);
                 }
             }
             InputMode::PickEditScheduled => {
                 if let Some(task) = self.selected_task().cloned() {
                     let value = self.current_picker_value();
-                    self.repo
+                    let updated = self.repo
                         .update_date_field(&task, "scheduled", value.as_deref())?;
+                    self.replace_cached_task(&task.path, updated);
                     self.input_mode = InputMode::None;
                     self.input_value.clear();
-                    self.reload_from_disk()?;
                     self.status = format!("Updated scheduled date for {}", task.title);
                 }
             }
@@ -555,21 +634,22 @@ impl App {
             InputMode::TextEditDue => {
                 if let Some(task) = self.selected_task().cloned() {
                     let value = option_from_input(&self.input_value);
-                    self.repo.update_date_field(&task, "due", value.as_deref())?;
+                    let updated = self.repo
+                        .update_date_field(&task, "due", value.as_deref())?;
+                    self.replace_cached_task(&task.path, updated);
                     self.input_mode = InputMode::None;
                     self.input_value.clear();
-                    self.reload_from_disk()?;
                     self.status = format!("Updated due date for {}", task.title);
                 }
             }
             InputMode::TextEditScheduled => {
                 if let Some(task) = self.selected_task().cloned() {
                     let value = option_from_input(&self.input_value);
-                    self.repo
+                    let updated = self.repo
                         .update_date_field(&task, "scheduled", value.as_deref())?;
+                    self.replace_cached_task(&task.path, updated);
                     self.input_mode = InputMode::None;
                     self.input_value.clear();
-                    self.reload_from_disk()?;
                     self.status = format!("Updated scheduled date for {}", task.title);
                 }
             }
@@ -614,76 +694,77 @@ impl App {
                         "New task: recurrence anchor (scheduled or completion)".to_string();
                 } else {
                     let title = self.draft.title.clone();
-                    self.repo.create_task_from_draft(&self.draft)?;
+                    let created = self.repo.create_task_from_draft(&self.draft)?;
                     self.input_mode = InputMode::None;
                     self.input_value.clear();
-                    self.reload_from_disk()?;
+                    self.append_cached_task(created);
                     self.status = format!("Created {}", title);
                 }
             }
             InputMode::CreateRecurrenceAnchor => {
                 self.draft.recurrence_anchor = option_from_input(&self.input_value);
                 let title = self.draft.title.clone();
-                self.repo.create_task_from_draft(&self.draft)?;
+                let created = self.repo.create_task_from_draft(&self.draft)?;
                 self.input_mode = InputMode::None;
                 self.input_value.clear();
-                self.reload_from_disk()?;
+                self.append_cached_task(created);
                 self.status = format!("Created {}", title);
             }
             InputMode::EditTitle => {
                 if let Some(task) = self.selected_task().cloned() {
                     let title = self.input_value.trim().to_string();
-                    self.repo.update_title(&task, &title)?;
+                    let updated = self.repo.update_title(&task, &title)?;
+                    self.replace_cached_task(&task.path, updated);
                     self.input_mode = InputMode::None;
                     self.input_value.clear();
-                    self.reload_from_disk()?;
                     self.status = format!("Renamed {}", title);
                 }
             }
             InputMode::EditPriority => {
                 if let Some(task) = self.selected_task().cloned() {
                     let value = option_from_input(&self.input_value);
-                    self.repo
+                    let updated = self.repo
                         .update_scalar_field(&task, "priority", value.as_deref())?;
+                    self.replace_cached_task(&task.path, updated);
                     self.input_mode = InputMode::None;
                     self.input_value.clear();
-                    self.reload_from_disk()?;
                     self.status = format!("Updated priority for {}", task.title);
                 }
             }
             InputMode::EditStatus => {
                 if let Some(task) = self.selected_task().cloned() {
                     let value = option_from_input(&self.input_value);
-                    self.repo
+                    let updated = self.repo
                         .update_scalar_field(&task, "status", value.as_deref())?;
+                    self.replace_cached_task(&task.path, updated);
                     self.input_mode = InputMode::None;
                     self.input_value.clear();
-                    self.reload_from_disk()?;
                     self.status = format!("Updated status for {}", task.title);
                 }
             }
             InputMode::EditRecurrence => {
                 if let Some(task) = self.selected_task().cloned() {
                     let value = option_from_input(&self.input_value);
-                    self.repo
+                    let mut updated = self.repo
                         .update_scalar_field(&task, "recurrence", value.as_deref())?;
                     if value.is_none() {
-                        self.repo.update_scalar_field(&task, "recurrenceAnchor", None)?;
+                        updated = self.repo
+                            .update_scalar_field(&task, "recurrenceAnchor", None)?;
                     }
+                    self.replace_cached_task(&task.path, updated);
                     self.input_mode = InputMode::None;
                     self.input_value.clear();
-                    self.reload_from_disk()?;
                     self.status = format!("Updated recurrence for {}", task.title);
                 }
             }
             InputMode::EditRecurrenceAnchor => {
                 if let Some(task) = self.selected_task().cloned() {
                     let value = option_from_input(&self.input_value);
-                    self.repo
+                    let updated = self.repo
                         .update_scalar_field(&task, "recurrenceAnchor", value.as_deref())?;
+                    self.replace_cached_task(&task.path, updated);
                     self.input_mode = InputMode::None;
                     self.input_value.clear();
-                    self.reload_from_disk()?;
                     self.status = format!("Updated recurrence anchor for {}", task.title);
                 }
             }
@@ -791,10 +872,11 @@ impl App {
             .map(|task| self.repo.absolute_task_path(task))
     }
 
-    pub fn filtered_palette_items(&self) -> Vec<&'static PaletteItem> {
+    pub fn filtered_palette_items(&self) -> Vec<PaletteItem> {
         let query = self.input_value.trim().to_ascii_lowercase();
-        let mut items: Vec<&PaletteItem> = PALETTE_ITEMS
-            .iter()
+        let mut items: Vec<PaletteItem> = self
+            .palette_items()
+            .into_iter()
             .filter(|item| query.is_empty() || palette_matches(item, &query))
             .collect();
         items.sort_by_key(|item| palette_rank(item, &query));
@@ -810,13 +892,10 @@ impl App {
                 self.status = "Refreshed task list".to_string();
             }
             PaletteCommand::ToggleComplete => self.toggle_selected()?,
+            PaletteCommand::ToggleArchive => self.toggle_selected_archive()?,
             PaletteCommand::ToggleTimeTracking => self.toggle_selected_time_tracking()?,
             PaletteCommand::ToggleRecurringSkip => self.skip_selected_today()?,
-            PaletteCommand::FilterOpen => self.set_filter(TaskFilter::Open)?,
-            PaletteCommand::FilterToday => self.set_filter(TaskFilter::Today)?,
-            PaletteCommand::FilterOverdue => self.set_filter(TaskFilter::Overdue)?,
-            PaletteCommand::FilterAll => self.set_filter(TaskFilter::All)?,
-            PaletteCommand::FilterTracked => self.set_filter(TaskFilter::Tracked)?,
+            PaletteCommand::ViewSlot(slot) => self.activate_view_slot(slot)?,
             PaletteCommand::EditTitle => self.begin_edit_title(),
             PaletteCommand::OpenInEditor => {
                 self.request_open_in_editor();
@@ -834,26 +913,19 @@ impl App {
 
 impl App {
     fn matches_filter(&self, task: &TaskRecord) -> bool {
-        match self.filter {
-            TaskFilter::All => true,
-            TaskFilter::Open => !is_completed_status(&self.repo.field_mapping, Some(&task.status)),
-            TaskFilter::Today => task
-                .scheduled
-                .as_deref()
-                .map(get_date_part)
-                .or_else(|| task.due.as_deref().map(get_date_part))
-                .map(|value| value == self.focus_date)
-                .unwrap_or(false),
-            TaskFilter::Overdue => task
-                .due
-                .as_deref()
-                .map(|due| {
-                    is_before_date_safe(due, &self.focus_date)
-                        && !is_completed_status(&self.repo.field_mapping, Some(&task.status))
-                })
-                .unwrap_or(false),
-            TaskFilter::Tracked => task.has_active_time_entry,
-        }
+        let Some(compiled) = self.compiled_views.get(&self.current_view_slot) else {
+            return true;
+        };
+        let Some(support) = self.view_eval_support.as_ref() else {
+            return false;
+        };
+        compiled.matches(
+            task,
+            &self.focus_date,
+            &self.repo.field_mapping,
+            &self.repo.config.archive,
+            support,
+        )
     }
 
     fn matches_search(&self, task: &TaskRecord) -> bool {
@@ -875,7 +947,7 @@ impl App {
         self.input_mode = mode;
         self.input_value.clear();
         self.picker_date = initial.map(get_date_part).unwrap_or_else(today_local);
-        self.picker_has_value = initial.is_some();
+        self.picker_has_value = true;
     }
 
     fn current_picker_value(&self) -> Option<String> {
@@ -883,6 +955,72 @@ impl App {
             Some(self.picker_date.clone())
         } else {
             None
+        }
+    }
+
+    pub fn current_view(&self) -> Option<&ViewConfig> {
+        self.tui_config.views.get(&self.current_view_slot)
+    }
+
+    pub fn available_view_slots(&self) -> Vec<u8> {
+        self.tui_config.views.keys().copied().collect()
+    }
+
+    fn current_view_error(&self) -> Option<String> {
+        self.compiled_views
+            .get(&self.current_view_slot)
+            .and_then(CompiledViewFilter::error_message)
+    }
+
+    fn palette_items(&self) -> Vec<PaletteItem> {
+        let mut items = static_palette_items();
+        for item in &mut items {
+            item.hotkey = self.command_hotkey(item.command);
+        }
+        items.extend(
+            self.tui_config
+                .views
+                .iter()
+                .map(|(slot, view)| PaletteItem {
+                    command: PaletteCommand::ViewSlot(*slot),
+                    title: format!("Switch to view {}: {}", slot, view.label),
+                    aliases: vec![
+                        slot.to_string(),
+                        view.label.to_ascii_lowercase(),
+                        view_filter_name(&view.filter).to_string(),
+                    ],
+                    description: format!("Activate configured view slot {}", slot),
+                    hotkey: Some(slot.to_string()),
+                }),
+        );
+        items
+    }
+
+    fn command_hotkey(&self, command: PaletteCommand) -> Option<String> {
+        let keys = &self.tui_config.keybinds;
+        let value = match command {
+            PaletteCommand::CreateTask => &keys.create_task,
+            PaletteCommand::Search => &keys.search,
+            PaletteCommand::Refresh => &keys.refresh,
+            PaletteCommand::ToggleComplete => &keys.toggle_complete,
+            PaletteCommand::ToggleArchive => &keys.toggle_archive,
+            PaletteCommand::ToggleTimeTracking => &keys.toggle_time_tracking,
+            PaletteCommand::ToggleRecurringSkip => &keys.toggle_skip_recurring,
+            PaletteCommand::ViewSlot(_) => return None,
+            PaletteCommand::EditTitle => &keys.edit_title,
+            PaletteCommand::OpenInEditor => &keys.open_in_editor,
+            PaletteCommand::EditDue => &keys.edit_due,
+            PaletteCommand::EditScheduled => &keys.edit_scheduled,
+            PaletteCommand::EditPriority => &keys.edit_priority,
+            PaletteCommand::EditStatus => &keys.edit_status,
+            PaletteCommand::EditRecurrence => &keys.edit_recurrence,
+            PaletteCommand::EditRecurrenceAnchor => &keys.edit_recurrence_anchor,
+        };
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
         }
     }
 }
@@ -908,22 +1046,35 @@ fn palette_matches(item: &PaletteItem, query: &str) -> bool {
         || fuzzy_match(&title, query)
 }
 
-fn palette_rank(item: &PaletteItem, query: &str) -> (usize, usize, &'static str) {
+fn palette_rank(item: &PaletteItem, query: &str) -> (usize, usize, String) {
     if query.is_empty() {
-        return (2, 0, item.title);
+        return (2, 0, item.title.clone());
     }
     let title = item.title.to_ascii_lowercase();
     if title.starts_with(query) {
-        return (0, title.len(), item.title);
+        return (0, title.len(), item.title.clone());
     }
     if item
         .aliases
         .iter()
         .any(|alias| alias.to_ascii_lowercase().starts_with(query))
     {
-        return (1, title.len(), item.title);
+        return (1, title.len(), item.title.clone());
     }
-    (2, title.len(), item.title)
+    (2, title.len(), item.title.clone())
+}
+
+fn view_filter_name(filter: &ViewFilter) -> &str {
+    match filter {
+        ViewFilter::All => "all",
+        ViewFilter::Open => "open",
+        ViewFilter::Date => "date",
+        ViewFilter::Overdue => "overdue",
+        ViewFilter::Tracked => "tracked",
+        ViewFilter::Archived => "archived",
+        ViewFilter::Status { .. } => "status",
+        ViewFilter::Expression { .. } => "expression",
+    }
 }
 
 fn fuzzy_match(haystack: &str, needle: &str) -> bool {

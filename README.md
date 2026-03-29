@@ -12,20 +12,49 @@ A fast terminal UI for TaskNotes-style markdown tasks, built in Rust on top of `
 
 The interactive TUI uses `mdbase-rs` for collection reads and writes. The repo also includes two conformance paths:
 
-- `npm run conformance:test`: runs the mature reference TaskNotes-spec suite against `mdbase-tasknotes`
-- `npm run conformance:test:bridge`: runs the same suite against the local Rust bridge surface in this repo
+- `npm run conformance:test`: runs the TaskNotes-spec suite against this repo's adapter, with fallback enabled for unsupported bridge operations
+- `npm run conformance:test:rust`: runs the same suite preferring the local Rust bridge first
+- `npm run conformance:test:reference`: runs the suite against the sibling `mdbase-tasknotes` reference implementation
 
-The second path is intentionally narrower today. It exists so the Rust core can be pushed toward spec parity incrementally without blocking the TUI itself.
+The Rust bridge path is intentionally narrower today. It exists so the Rust core can be pushed toward spec parity incrementally without blocking the TUI itself.
 
-The JS adapter defaults to fallback-first routing through `mdbase-tasknotes` for conformance runs. Set `TASKNOTES_TUI_BRIDGE_MODE=rust` to exercise the local Rust bridge first.
+`mdbase-tasknotes` is not part of the TUI runtime. It is only used in the conformance harness today as a sibling reference/fallback implementation while the local Rust bridge continues moving toward full parity.
 
 ## Run
 
 ```bash
 cargo run --bin tasknotes-tui -- --root /path/to/vault
+cargo run --bin tasknotes-tui -- print-default-config
 ```
 
 The target vault must be readable by `mdbase-rs`, which means it should contain `mdbase.yaml` and a task type definition.
+
+The TUI reads an optional vault-specific `tasknotes-tui.yaml` from that same root. Keeping it in the vault root is the right default for this project: views and keybinds are part of how you work with a specific vault, not global machine state.
+
+## Install
+
+For local development:
+
+```bash
+cargo run --bin tasknotes-tui -- --root /path/to/vault
+```
+
+For direct install from git:
+
+```bash
+cargo install --git <repo-url> --bin tasknotes-tui
+```
+
+GitHub Releases can also ship prebuilt archives for:
+
+- Linux x86_64
+- macOS x86_64
+- macOS Apple Silicon
+- Windows x86_64
+
+A release workflow is included at [`.github/workflows/release.yml`](/home/calluma/projects/tasknotes-tui/.github/workflows/release.yml). Tagging a release like `v0.1.0` will build platform archives and attach them to the GitHub Release.
+
+The runtime also honors the vault-root `tasknotes.yaml` TaskNotes-spec config for behavior such as field mapping, defaults, archive semantics, and related task behavior. Task membership itself comes from the `mdbase` type definition, not from `tasknotes.yaml`.
 
 ## Keys
 
@@ -39,8 +68,10 @@ The target vault must be readable by `mdbase-rs`, which means it should contain 
 - `3`: overdue
 - `4`: all
 - `5`: tracked
+- `6`: archived
 - `/`: search
 - `x` or `space`: toggle completion
+- `z`: archive or restore the selected task
 - `T`: start/stop time tracking on the selected task
 - `S`: skip/unskip today's recurring instance
 - `n`: create task
@@ -57,7 +88,25 @@ The target vault must be readable by `mdbase-rs`, which means it should contain 
 
 ## Command Palette
 
-`Ctrl-P` opens a modal command panel with fuzzy filtering, keyboard navigation, and inline help. It exposes filters, editing actions, creation, refresh, completion toggling, and recurring skip actions from one place.
+`Ctrl-P` opens a modal command panel with fuzzy filtering, keyboard navigation, and inline help. It exposes configured view slots from `tasknotes-tui.yaml` alongside editing actions, creation, refresh, completion toggling, archive toggling, and recurring skip actions.
+
+Archive follows TaskNotes-spec-compatible semantics in this TUI by marking tasks with the `archived` tag and `archived: true`, while optionally moving files to the configured archive folder.
+
+Archive semantics are configurable in `tasknotes.yaml`:
+
+```yaml
+archive:
+  move_on_archive: false
+  folder: "TaskNotes/Archive"
+  tag: "archived"
+  field: "archived"
+```
+
+`tag` and `field` control what the TUI writes and what it considers archived in views and filtering.
+
+Archive and restore now update the in-memory task cache immediately instead of forcing a full vault reload, so those actions stay fast even in larger vaults. Use `r` when you want a full disk refresh.
+
+What counts as a task in the TUI is defined by the `mdbase` task type. If a file is not classified by `mdbase` as a `task`, the runtime will not surface it as a task even if its frontmatter looks task-like.
 
 Task body editing is intentionally delegated to your external editor rather than being done inline in the TUI.
 
@@ -69,6 +118,87 @@ Time tracking is now supported as a task action and on the TaskNotes-spec bridge
 - `5`: show tasks with an active timer
 
 Tracked tasks are marked in the list and show `Tracking: active` in the details pane.
+
+## TUI Config
+
+`tasknotes-tui.yaml` lets you configure keybinds and up to 9 privileged view slots for the number keys.
+
+To print the exact default config:
+
+```bash
+tasknotes-tui print-default-config
+```
+
+Example:
+
+```yaml
+keybinds:
+  command_palette: "ctrl-p"
+  create_task: "a"
+  open_in_editor: "enter"
+  toggle_time_tracking: "shift-t"
+
+views:
+  1:
+    label: "Inbox"
+    kind: "open"
+  2:
+    label: "Today"
+    kind: "date"
+  3:
+    label: "Doing"
+    kind: "status"
+    value: "doing"
+  4:
+    label: "Overdue"
+    kind: "overdue"
+  5:
+    label: "Tracked"
+    kind: "tracked"
+  6:
+    label: "Archived"
+    kind: "archived"
+  7:
+    label: "All"
+    kind: "all"
+```
+
+Supported view kinds:
+
+- `all`
+- `open`
+- `date`
+- `overdue`
+- `tracked`
+- `archived`
+- `status` with `value`
+- `expression` with `expression`, `where`, or `value`
+
+Number keys `1` through `9` always activate the corresponding configured slot when present.
+
+Expression views use the `mdbase` expression syntax and are evaluated against the in-memory task cache, so view switching stays fast after a reload. Example:
+
+```yaml
+views:
+  6:
+    label: "Doing Today"
+    kind: "expression"
+    expression: "status == \"doing\" && (scheduled == focusDate || due == focusDate)"
+  7:
+    label: "Tracked Work"
+    kind: "expression"
+    where: "isTracked && !isCompleted"
+```
+
+Available expression context includes normal normalized task fields like `status`, `priority`, `due`, `scheduled`, `timeEntries`, plus:
+
+- `focusDate`: the currently focused calendar date
+- `today`: today’s local date
+- `isCompleted`: boolean derived from TaskNotes completed-status rules
+- `isTracked`: boolean for an active time entry
+- `isArchived`: boolean for archive state
+- `path`: the task path
+- `file.*`: `mdbase` file helpers such as `file.path`, `file.body`, tags, links, and related expression helpers
 
 ## Calendar
 

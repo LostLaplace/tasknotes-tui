@@ -1,24 +1,59 @@
 use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
+use regex::Regex;
 use serde_json::json;
+
+fn strict_date_regex() -> Regex {
+    Regex::new(r"^\d{4}-\d{2}-\d{2}$").expect("valid regex")
+}
+
+fn strict_datetime_regex() -> Regex {
+    Regex::new(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})?$")
+        .expect("valid regex")
+}
+
+fn is_strict_datetime(trimmed: &str) -> bool {
+    if !strict_datetime_regex().is_match(trimmed) {
+        return false;
+    }
+
+    let hour = trimmed.get(11..13).and_then(|v| v.parse::<u32>().ok());
+    let minute = trimmed.get(14..16).and_then(|v| v.parse::<u32>().ok());
+    let second = trimmed.get(17..19).and_then(|v| v.parse::<u32>().ok());
+
+    matches!(hour, Some(0..=23)) && matches!(minute, Some(0..=59)) && matches!(second, Some(0..=59))
+}
 
 pub fn parse_date_to_utc(value: &str) -> anyhow::Result<DateTime<Utc>> {
     let trimmed = value.trim();
     anyhow::ensure!(!trimmed.is_empty(), "Date string cannot be empty");
 
-    if let Ok(date) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+    if strict_date_regex().is_match(trimmed) {
+        let date = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+            .map_err(|_| anyhow::anyhow!("Invalid date \"{}\".", value))?;
         return Ok(DateTime::<Utc>::from_naive_utc_and_offset(
             date.and_hms_opt(0, 0, 0).expect("valid midnight"),
             Utc,
         ));
     }
 
-    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
-        return Ok(dt.with_timezone(&Utc));
-    }
+    if is_strict_datetime(trimmed) {
+        if trimmed.ends_with('Z')
+            || trimmed
+                .as_bytes()
+                .iter()
+                .rev()
+                .take(6)
+                .any(|byte| *byte == b'+' || *byte == b'-')
+        {
+            let dt = DateTime::parse_from_rfc3339(trimmed)
+                .map_err(|_| anyhow::anyhow!("Invalid date \"{}\".", value))?;
+            return Ok(dt.with_timezone(&Utc));
+        }
 
-    if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S") {
-        return Ok(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S%.f") {
+            return Ok(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        }
     }
 
     anyhow::bail!("Invalid date \"{}\".", value);
@@ -28,7 +63,9 @@ pub fn parse_date_to_local(value: &str) -> anyhow::Result<DateTime<Local>> {
     let trimmed = value.trim();
     anyhow::ensure!(!trimmed.is_empty(), "Date string cannot be empty");
 
-    if let Ok(date) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+    if strict_date_regex().is_match(trimmed) {
+        let date = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
+            .map_err(|_| anyhow::anyhow!("Invalid date \"{}\".", value))?;
         let dt = Local
             .from_local_datetime(&date.and_hms_opt(0, 0, 0).expect("valid midnight"))
             .single()
@@ -36,25 +73,42 @@ pub fn parse_date_to_local(value: &str) -> anyhow::Result<DateTime<Local>> {
         return Ok(dt);
     }
 
-    if let Ok(dt) = DateTime::parse_from_rfc3339(trimmed) {
-        return Ok(dt.with_timezone(&Local));
-    }
+    if is_strict_datetime(trimmed) {
+        if trimmed.ends_with('Z')
+            || trimmed
+                .as_bytes()
+                .iter()
+                .rev()
+                .take(6)
+                .any(|byte| *byte == b'+' || *byte == b'-')
+        {
+            let dt = DateTime::parse_from_rfc3339(trimmed)
+                .map_err(|_| anyhow::anyhow!("Invalid date \"{}\".", value))?;
+            return Ok(dt.with_timezone(&Local));
+        }
 
-    if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S") {
-        let dt = Local
-            .from_local_datetime(&dt)
-            .single()
-            .ok_or_else(|| anyhow::anyhow!("Invalid date \"{}\".", value))?;
-        return Ok(dt);
+        if let Ok(dt) = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S%.f") {
+            let dt = Local
+                .from_local_datetime(&dt)
+                .single()
+                .ok_or_else(|| anyhow::anyhow!("Invalid date \"{}\".", value))?;
+            return Ok(dt);
+        }
     }
 
     anyhow::bail!("Invalid date \"{}\".", value);
 }
 
 pub fn validate_date_string(value: &str) -> anyhow::Result<String> {
-    NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d")
+    let trimmed = value.trim();
+    anyhow::ensure!(
+        strict_date_regex().is_match(trimmed),
+        "Invalid date \"{}\". Expected YYYY-MM-DD.",
+        value
+    );
+    NaiveDate::parse_from_str(trimmed, "%Y-%m-%d")
         .map_err(|_| anyhow::anyhow!("Invalid date \"{}\". Expected YYYY-MM-DD.", value))?;
-    Ok(value.trim().to_string())
+    Ok(trimmed.to_string())
 }
 
 pub fn get_date_part(value: &str) -> String {
@@ -70,7 +124,9 @@ pub fn get_date_part(value: &str) -> String {
 }
 
 pub fn has_time_component(value: &str) -> bool {
-    value.contains('T')
+    Regex::new(r"T\d{2}:\d{2}")
+        .expect("valid regex")
+        .is_match(value.trim())
 }
 
 pub fn is_same_date_safe(a: &str, b: &str) -> bool {
@@ -90,28 +146,28 @@ pub fn resolve_operation_target_date(
     explicit_date: Option<&str>,
     scheduled: Option<&str>,
     due: Option<&str>,
-) -> String {
-    if let Some(date) = explicit_date.and_then(|v| validate_date_string(v).ok()) {
-        return date;
+) -> anyhow::Result<String> {
+    if let Some(date) = explicit_date {
+        return validate_date_string(date);
     }
     if let Some(date) = scheduled
         .map(get_date_part)
         .filter(|v| validate_date_string(v).is_ok())
     {
-        return date;
+        return Ok(date);
     }
     if let Some(date) = due
         .map(get_date_part)
         .filter(|v| validate_date_string(v).is_ok())
     {
-        return date;
+        return Ok(date);
     }
-    Local::now().format("%Y-%m-%d").to_string()
+    Ok(Local::now().format("%Y-%m-%d").to_string())
 }
 
-pub fn day_in_timezone(now: &str, timezone: &str) -> anyhow::Result<String> {
+pub fn day_in_timezone(instant: &str, timezone: &str) -> anyhow::Result<String> {
     let tz: Tz = timezone.parse()?;
-    let instant = parse_date_to_utc(now)?;
+    let instant = parse_date_to_utc(instant)?;
     Ok(instant.with_timezone(&tz).format("%Y-%m-%d").to_string())
 }
 
@@ -119,7 +175,7 @@ pub fn parse_utc_result(value: &str) -> anyhow::Result<serde_json::Value> {
     let parsed = parse_date_to_utc(value)?;
     Ok(json!({
         "date": parsed.format("%Y-%m-%d").to_string(),
-        "isoDate": parsed.to_rfc3339(),
+        "isoDate": parsed.to_rfc3339().get(..10).unwrap_or_default(),
     }))
 }
 
@@ -171,7 +227,9 @@ pub fn apply_month_offset(base: &str, offset_months: i32) -> Option<String> {
     };
     let max_day = next_month.pred_opt()?.day();
     let day = date.day().min(max_day);
-    first_of_target.with_day(day).map(|value| value.format("%Y-%m-%d").to_string())
+    first_of_target
+        .with_day(day)
+        .map(|value| value.format("%Y-%m-%d").to_string())
 }
 
 pub fn compare_day(a: &str, b: &str) -> Option<std::cmp::Ordering> {

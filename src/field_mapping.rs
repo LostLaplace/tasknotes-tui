@@ -134,13 +134,25 @@ pub fn build_field_mapping(
             .and_then(Value::as_str)
             .and_then(FieldRole::parse)
         {
-            if assigned.insert(role.as_str().to_string()) {
+            let role_key = role.as_str().to_string();
+            if assigned.insert(role_key.clone()) {
                 mapping
                     .role_to_field
-                    .insert(role.as_str().to_string(), field_name.clone());
-                mapping
-                    .field_to_role
-                    .insert(field_name.clone(), role.as_str().to_string());
+                    .insert(role_key.clone(), field_name.clone());
+                mapping.field_to_role.insert(field_name.clone(), role_key);
+            } else {
+                let current = mapping
+                    .role_to_field
+                    .get(&role_key)
+                    .cloned()
+                    .unwrap_or_default();
+                let replace = field_name.len() < current.len()
+                    || (field_name.len() == current.len() && field_name < &current);
+                if replace {
+                    mapping
+                        .role_to_field
+                        .insert(role_key.clone(), field_name.clone());
+                }
             }
         }
     }
@@ -223,10 +235,7 @@ fn infer_completed_statuses(fields: &Map<String, Value>, status_field_name: &str
             .filter_map(Value::as_str)
             .filter(|value| {
                 let lower = value.to_ascii_lowercase();
-                lower.contains("done")
-                    || lower.contains("complete")
-                    || lower.contains("cancel")
-                    || lower.contains("finish")
+                lower.contains("done") || lower.contains("complete") || lower.contains("cancel")
             })
             .map(str::to_string)
             .collect();
@@ -276,13 +285,10 @@ pub fn resolve_display_title(
     task_path: Option<&str>,
 ) -> Option<String> {
     for key in [&mapping.display_name_key, "title"] {
-        if let Some(value) = frontmatter
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-        {
-            return Some(value.to_string());
+        if let Some(value) = frontmatter.get(key).and_then(Value::as_str) {
+            if !value.trim().is_empty() {
+                return Some(value.to_string());
+            }
         }
     }
 

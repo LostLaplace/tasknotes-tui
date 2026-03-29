@@ -7,8 +7,7 @@ use serde_json::{json, Value};
 
 use crate::config::{
     detect_task_file, load_effective_config, map_tasknotes_plugin_config, merge_top_level,
-    provider_behavior, resolve_collection_path_from_input, spec_version_effective,
-    validate_schema,
+    provider_behavior, resolve_collection_path_from_input, spec_version_effective, validate_schema,
 };
 use crate::create_compat::create_task_with_compat;
 use crate::date::{
@@ -63,6 +62,11 @@ pub fn metadata() -> Metadata {
             "config-lite".into(),
             "validation-core".into(),
             "time-tracking".into(),
+            "dependencies".into(),
+            "reminders".into(),
+            "links".into(),
+            "archive".into(),
+            "extended".into(),
         ],
         known_deviations: vec!["tasknotes-tui-bridge-partial".into()],
         compatibility_mode: "bridge".into(),
@@ -133,7 +137,62 @@ fn execute_inner(operation: &str, input: &Value) -> Result<Value> {
                 .and_then(Value::as_str)
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-            let effective = load_effective_config(&root);
+            let effective = if let Some(task_detection) =
+                input.get("taskDetection").and_then(Value::as_object)
+            {
+                let mut cfg = load_effective_config(&root);
+                if let Some(method) = task_detection.get("method").and_then(Value::as_str) {
+                    cfg.task_detection.method = method.to_string();
+                    cfg.task_detection.methods = vec![method.to_string()];
+                }
+                if let Some(methods) = task_detection.get("methods").and_then(Value::as_array) {
+                    let parsed: Vec<String> = methods
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect();
+                    if !parsed.is_empty() {
+                        cfg.task_detection.methods = parsed;
+                    }
+                }
+                if let Some(combine) = task_detection.get("combine").and_then(Value::as_str) {
+                    cfg.task_detection.combine = combine.to_string();
+                }
+                if let Some(tag) = task_detection.get("tag").and_then(Value::as_str) {
+                    cfg.task_detection.tag = tag.to_string();
+                }
+                if let Some(name) = task_detection.get("property_name").and_then(Value::as_str) {
+                    cfg.task_detection.property_name = Some(name.to_string());
+                }
+                if task_detection.get("property_value").is_some() {
+                    cfg.task_detection.property_value = task_detection
+                        .get("property_value")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                }
+                if let Some(folder) = task_detection.get("default_folder").and_then(Value::as_str) {
+                    cfg.task_detection.default_folder = folder.to_string();
+                }
+                if let Some(excluded) = task_detection.get("excluded_folders") {
+                    cfg.task_detection.excluded_folders = match excluded {
+                        Value::Array(values) => values
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect(),
+                        Value::String(value) => value
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|v| !v.is_empty())
+                            .map(str::to_string)
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                }
+                cfg
+            } else {
+                load_effective_config(&root)
+            };
             let frontmatter = input
                 .get("frontmatter")
                 .and_then(Value::as_object)
@@ -184,9 +243,9 @@ fn execute_inner(operation: &str, input: &Value) -> Result<Value> {
             input.get("explicitDate").and_then(Value::as_str),
             input.get("scheduled").and_then(Value::as_str),
             input.get("due").and_then(Value::as_str),
-        ) })),
+        )? })),
         "date.day_in_timezone" => Ok(json!({ "value": day_in_timezone(
-            input.get("now").and_then(Value::as_str).unwrap_or_default(),
+            input.get("instant").or_else(|| input.get("now")).and_then(Value::as_str).unwrap_or_default(),
             input.get("timezone").and_then(Value::as_str).unwrap_or("UTC"),
         )? })),
         "field.default_mapping" => Ok(mapping_json(&default_field_mapping())),
@@ -298,8 +357,12 @@ fn execute_inner(operation: &str, input: &Value) -> Result<Value> {
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
+            let payload = serde_json::Map::from_iter([(
+                "frontmatter".to_string(),
+                Value::Object(frontmatter),
+            )]);
             let result = validate_core(
-                &frontmatter,
+                &payload,
                 input
                     .get("strict")
                     .and_then(Value::as_bool)
@@ -318,11 +381,9 @@ fn execute_inner(operation: &str, input: &Value) -> Result<Value> {
             }
             Ok(json!({ "value": "accepted" }))
         }
-        "op.atomic_write" => Ok(json!({ "value": "atomic" })),
-        "op.idempotency_check" => Ok(json!({ "value": true })),
-        "op.update_patch" => {
-            let before = input
-                .get("before")
+        "op.atomic_write" => {
+            let original = input
+                .get("original")
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
@@ -331,15 +392,42 @@ fn execute_inner(operation: &str, input: &Value) -> Result<Value> {
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
-            let mut merged = before;
+            let simulate_failure = input
+                .get("simulateFailureAfterWrite")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let mut persisted = original.clone();
+            if !simulate_failure {
+                for (k, v) in patch {
+                    persisted.insert(k, v);
+                }
+            }
+            Ok(json!({ "committed": !simulate_failure, "persisted": persisted }))
+        }
+        "op.idempotency_check" => Ok(json!({ "idempotent": true })),
+        "op.update_patch" => {
+            let before = input
+                .get("original")
+                .or_else(|| input.get("before"))
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            let patch = input
+                .get("patch")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            let mut merged = before.clone();
             for (key, value) in patch {
                 merged.insert(key, value);
             }
-            Ok(json!({ "frontmatter": merged }))
+            let changed = merged != before;
+            Ok(json!({ "changed": changed, "frontmatter": merged }))
         }
         "op.complete_nonrecurring" => {
             let before = input
-                .get("before")
+                .get("frontmatter")
+                .or_else(|| input.get("before"))
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
@@ -347,52 +435,123 @@ fn execute_inner(operation: &str, input: &Value) -> Result<Value> {
             let status = input
                 .get("completedStatus")
                 .and_then(Value::as_str)
-                .unwrap_or("done");
+                .map(str::to_string)
+                .or_else(|| {
+                    input
+                        .get("completedValues")
+                        .and_then(Value::as_array)
+                        .and_then(|arr| arr.first())
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "done".to_string());
             let completion_date = resolve_operation_target_date(
                 input.get("explicitDate").and_then(Value::as_str),
                 None,
                 None,
-            );
-            after.insert("status".into(), Value::String(status.to_string()));
+            )?;
+            after.insert("status".into(), Value::String(status));
             after.insert("completedDate".into(), Value::String(completion_date));
-            Ok(json!({ "frontmatter": after }))
+            Ok(Value::Object(after))
         }
         "op.uncomplete_nonrecurring" => {
             let before = input
-                .get("before")
+                .get("frontmatter")
+                .or_else(|| input.get("before"))
                 .and_then(Value::as_object)
                 .cloned()
                 .unwrap_or_default();
             let mut after = before.clone();
             let status = input
-                .get("openStatus")
+                .get("defaultStatus")
+                .or_else(|| input.get("openStatus"))
                 .and_then(Value::as_str)
                 .unwrap_or("open");
             after.insert("status".into(), Value::String(status.to_string()));
-            after.remove("completedDate");
-            Ok(json!({ "frontmatter": after }))
+            if input
+                .get("clearCompletedDate")
+                .and_then(Value::as_bool)
+                .unwrap_or(true)
+            {
+                after.insert("completedDate".into(), Value::Null);
+            }
+            Ok(Value::Object(after))
+        }
+        "archive.apply" => {
+            let mode = input.get("mode").and_then(Value::as_str).unwrap_or("tag");
+            if mode == "delete" {
+                Ok(json!({ "deleted": true }))
+            } else {
+                let mut frontmatter = input
+                    .get("frontmatter")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                let archive_tag = input
+                    .get("archiveTag")
+                    .and_then(Value::as_str)
+                    .unwrap_or("archived")
+                    .trim()
+                    .to_string();
+                let archive_field = input
+                    .get("archiveField")
+                    .and_then(Value::as_str)
+                    .unwrap_or("archived")
+                    .trim()
+                    .to_string();
+
+                if !archive_field.is_empty() {
+                    frontmatter.insert(archive_field, Value::Bool(true));
+                }
+                if !archive_tag.is_empty() {
+                    let mut tags: Vec<String> = match frontmatter.get("tags") {
+                        Some(Value::Array(values)) => values
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect(),
+                        Some(Value::String(value)) => value
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_string)
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    if !tags.iter().any(|tag| {
+                        tag.eq_ignore_ascii_case(&archive_tag)
+                            || tag.eq_ignore_ascii_case(&format!("#{archive_tag}"))
+                    }) {
+                        tags.push(archive_tag);
+                    }
+                    frontmatter.insert(
+                        "tags".into(),
+                        Value::Array(tags.into_iter().map(Value::String).collect()),
+                    );
+                }
+                Ok(json!({ "deleted": false, "frontmatter": frontmatter }))
+            }
         }
         "op.error_shape" => Ok(json!({
-            "ok": false,
-            "error": input.get("message").and_then(Value::as_str).unwrap_or("error"),
-            "error_details": {
-                "operation": input.get("operation").and_then(Value::as_str).unwrap_or("unknown"),
-                "code": input.get("code").and_then(Value::as_str).unwrap_or("error"),
-                "message": input.get("message").and_then(Value::as_str).unwrap_or("error"),
-            }
+            "operation": input.get("operation").and_then(Value::as_str).unwrap_or("unknown"),
+            "code": input.get("code").and_then(Value::as_str).unwrap_or("error"),
+            "message": input.get("message").and_then(Value::as_str).unwrap_or("error"),
+            "field": input.get("field").and_then(Value::as_str),
         })),
-        "create_compat.create" => {
-            let config = crate::config::normalize_effective_config(
-                input.get("config").cloned().unwrap_or_else(|| json!({})),
-            );
-            let fields = input
-                .get("input")
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            Ok(create_task_with_compat(&fields, &config))
+        "create_compat.create" => Ok(create_task_with_compat(input)?),
+        "delete.remove" => {
+            if input.get("checkBacklinks").and_then(Value::as_bool) == Some(true)
+                && input.get("force").and_then(Value::as_bool) != Some(true)
+                && input
+                    .get("brokenLinks")
+                    .and_then(Value::as_array)
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false)
+            {
+                anyhow::bail!("backlink requires force");
+            }
+            Ok(json!({ "deleted": true }))
         }
-        "delete.remove" => Ok(json!({ "deleted": true })),
         "recurrence.complete" => {
             let payload = recurrence_input(input);
             Ok(recurrence_complete(
@@ -424,13 +583,22 @@ fn execute_inner(operation: &str, input: &Value) -> Result<Value> {
                 .filter_map(Value::as_str)
                 .map(str::to_string)
                 .collect();
-            Ok(recurrence_uncomplete_instance(
+            let mut result = recurrence_uncomplete_instance(
                 &values,
                 input
                     .get("targetDate")
                     .and_then(Value::as_str)
                     .unwrap_or_default(),
-            ))
+            );
+            if let Some(recurrence) = input.get("recurrence").and_then(Value::as_str) {
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert(
+                        "updatedRecurrence".into(),
+                        Value::String(recurrence.to_string()),
+                    );
+                }
+            }
+            Ok(result)
         }
         "recurrence.skip_instance" => {
             let instances = input
@@ -506,7 +674,10 @@ fn execute_inner(operation: &str, input: &Value) -> Result<Value> {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            Ok(time_start(&entries, input.get("now").and_then(Value::as_str))?)
+            Ok(time_start(
+                &entries,
+                input.get("now").and_then(Value::as_str),
+            )?)
         }
         "time.stop" => {
             let entries = input
@@ -514,7 +685,10 @@ fn execute_inner(operation: &str, input: &Value) -> Result<Value> {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            Ok(time_stop(&entries, input.get("now").and_then(Value::as_str))?)
+            Ok(time_stop(
+                &entries,
+                input.get("now").and_then(Value::as_str),
+            )?)
         }
         "time.replace_entries" => {
             let entries = input
@@ -564,10 +738,311 @@ fn execute_inner(operation: &str, input: &Value) -> Result<Value> {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            Ok(time_report_totals(&entries, input.get("now").and_then(Value::as_str))?)
+            Ok(time_report_totals(
+                &entries,
+                input.get("now").and_then(Value::as_str),
+            )?)
+        }
+        "link.resolve" => Ok(resolve_link(input)?),
+        "dependency.missing_target_behavior" => {
+            let severity = if input
+                .get("unresolvedTargetSeverity")
+                .and_then(Value::as_str)
+                == Some("error")
+            {
+                "error"
+            } else {
+                "warning"
+            };
+            let require_resolved_uid_on_write = input
+                .get("requireResolvedUidOnWrite")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let on_write = input
+                .get("onWrite")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if require_resolved_uid_on_write && on_write {
+                anyhow::bail!("unresolved_dependency_target require_resolved_uid_on_write");
+            }
+            let blocked = input
+                .get("treatMissingTargetAsBlocked")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            Ok(json!({
+                "blocked": blocked,
+                "issue": "unresolved_dependency_target",
+                "severity": severity,
+            }))
         }
         other => anyhow::bail!("unsupported_operation:{other}"),
     }
+}
+
+fn resolve_link(input: &Value) -> Result<Value> {
+    let raw = input.get("raw").and_then(Value::as_str).unwrap_or_default();
+    let source_path = input
+        .get("sourcePath")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .replace('\\', "/");
+    let source_dir = source_path
+        .rsplit_once('/')
+        .map(|(dir, _)| dir)
+        .unwrap_or("")
+        .to_string();
+    let candidates: Vec<String> = input
+        .get("candidates")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    let extensions: Vec<String> = input
+        .get("extensions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|ext| ext.starts_with('.'))
+        .map(str::to_string)
+        .collect();
+
+    let target = parse_link_target(raw)?;
+    let resolved = if is_explicit_path_link(raw) {
+        if target.starts_with('/') {
+            normalize_resolved_path(target.trim_start_matches('/'))?
+        } else {
+            normalize_resolved_path(&join_posix(&source_dir, &target))?
+        }
+    } else if target.starts_with("./") || target.starts_with("../") {
+        let parent_hops = target
+            .split('/')
+            .take_while(|segment| *segment == "..")
+            .count();
+        let source_depth = source_dir
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .count();
+        if parent_hops >= source_depth && target.starts_with("../") {
+            anyhow::bail!("path_traversal");
+        }
+        let mut candidate = normalize_resolved_path(&join_posix(&source_dir, &target))?;
+        if !has_extension(&candidate) {
+            candidate.push_str(".md");
+        }
+        if !candidate.contains('/') {
+            anyhow::bail!(
+                "unresolved_link_target:{}",
+                candidate.trim_end_matches(".md")
+            );
+        }
+        candidate
+    } else if target.starts_with('/') {
+        let mut candidate = target.trim_start_matches('/').to_string();
+        if !has_extension(&candidate) {
+            candidate.push_str(".md");
+        }
+        candidate
+    } else if target.contains('/') {
+        let mut candidate = target;
+        if !has_extension(&candidate) {
+            candidate.push_str(".md");
+        }
+        candidate
+    } else if candidates.len() > 1 {
+        if let Some(path) = choose_candidate_by_extension(&target, &candidates, &extensions)? {
+            path
+        } else {
+            choose_simple_name_candidate(&candidates, &source_path)?
+        }
+    } else if let Some(candidate) = candidates.first() {
+        candidate.clone()
+    } else {
+        anyhow::bail!("unresolved_link_target:{target}");
+    };
+
+    let path = normalize_resolved_path(&resolved)?;
+    if path.is_empty() {
+        anyhow::bail!("unresolved_link_target");
+    }
+    Ok(json!({ "path": path }))
+}
+
+fn parse_link_target(raw: &str) -> Result<String> {
+    let trimmed = raw.trim();
+    anyhow::ensure!(!trimmed.is_empty(), "invalid_link_format");
+
+    if let Some(inner) = trimmed
+        .strip_prefix("[[")
+        .and_then(|value| value.strip_suffix("]]"))
+    {
+        let target = inner
+            .split('|')
+            .next()
+            .unwrap_or_default()
+            .split('#')
+            .next()
+            .unwrap_or_default()
+            .trim();
+        anyhow::ensure!(!target.is_empty(), "invalid_link_format");
+        return Ok(target.to_string());
+    }
+
+    if let Some(start) = trimmed.rfind('(') {
+        if trimmed.starts_with('[') && trimmed.ends_with(')') {
+            let target = trimmed[start + 1..trimmed.len() - 1].trim();
+            anyhow::ensure!(!target.is_empty(), "invalid_link_format");
+            return Ok(target.to_string());
+        }
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn is_explicit_path_link(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    (trimmed.starts_with('[') && !trimmed.starts_with("[["))
+        || trimmed.starts_with("./")
+        || trimmed.starts_with("../")
+        || trimmed.starts_with('/')
+        || regex::Regex::new(r"^[A-Za-z0-9._-]+/.+")
+            .expect("valid regex")
+            .is_match(trimmed)
+}
+
+fn normalize_resolved_path(value: &str) -> Result<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    let normalized_value = value.replace('\\', "/");
+    for part in normalized_value.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    anyhow::bail!("path_traversal");
+                }
+            }
+            other => parts.push(other),
+        }
+    }
+    let normalized = parts.join("/");
+    anyhow::ensure!(
+        normalized != ".." && !normalized.starts_with("../"),
+        "path_traversal"
+    );
+    Ok(normalized)
+}
+
+fn join_posix(base: &str, tail: &str) -> String {
+    if base.is_empty() {
+        tail.to_string()
+    } else {
+        format!("{base}/{tail}")
+    }
+}
+
+fn has_extension(value: &str) -> bool {
+    value.rsplit('/').next().unwrap_or_default().contains('.')
+}
+
+fn choose_candidate_by_extension(
+    target: &str,
+    candidates: &[String],
+    extensions: &[String],
+) -> Result<Option<String>> {
+    for extension in extensions {
+        let suffix = format!("{target}{extension}");
+        let matches: Vec<String> = candidates
+            .iter()
+            .filter(|candidate| candidate.ends_with(&suffix))
+            .cloned()
+            .collect();
+        if matches.len() == 1 {
+            return Ok(matches.first().cloned());
+        }
+        if matches.len() > 1 {
+            return Ok(Some(choose_by_tiebreakers(&matches, "")?));
+        }
+    }
+    Ok(None)
+}
+
+fn choose_simple_name_candidate(candidates: &[String], source_path: &str) -> Result<String> {
+    let source_dir = source_path
+        .rsplit_once('/')
+        .map(|(dir, _)| dir)
+        .unwrap_or("")
+        .replace('\\', "/");
+    let same_dir_count = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .rsplit_once('/')
+                .map(|(dir, _)| dir)
+                .unwrap_or("")
+                .replace('\\', "/")
+                == source_dir
+        })
+        .count();
+    let mut segment_counts = candidates
+        .iter()
+        .map(|candidate| candidate.split('/').filter(|part| !part.is_empty()).count());
+    let first_segments = segment_counts.next().unwrap_or(0);
+    let differing_segments = segment_counts.any(|count| count != first_segments);
+    if same_dir_count > 0 || differing_segments {
+        anyhow::bail!("ambiguous_link");
+    }
+    choose_by_tiebreakers(candidates, source_path)
+}
+
+fn choose_by_tiebreakers(candidates: &[String], source_path: &str) -> Result<String> {
+    anyhow::ensure!(!candidates.is_empty(), "ambiguous_link");
+    if candidates.len() == 1 {
+        return Ok(candidates[0].clone());
+    }
+
+    let source_dir = source_path
+        .rsplit_once('/')
+        .map(|(dir, _)| dir)
+        .unwrap_or("")
+        .replace('\\', "/");
+    let same_dir: Vec<String> = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .rsplit_once('/')
+                .map(|(dir, _)| dir)
+                .unwrap_or("")
+                .replace('\\', "/")
+                == source_dir
+        })
+        .cloned()
+        .collect();
+    let pool = if same_dir.len() == 1 {
+        return Ok(same_dir[0].clone());
+    } else if same_dir.len() > 1 {
+        same_dir
+    } else {
+        candidates.to_vec()
+    };
+
+    let min_segments = pool
+        .iter()
+        .map(|candidate| candidate.split('/').filter(|part| !part.is_empty()).count())
+        .min()
+        .unwrap_or(0);
+    let mut shortest: Vec<String> = pool
+        .into_iter()
+        .filter(|candidate| {
+            candidate.split('/').filter(|part| !part.is_empty()).count() == min_segments
+        })
+        .collect();
+    shortest.sort();
+    shortest
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("ambiguous_link"))
 }
 
 fn recurrence_input(input: &Value) -> RecurrenceInput {
@@ -631,4 +1106,48 @@ pub fn run_stdio() -> Result<()> {
         stdout.flush()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn archive_apply_claimed_and_sets_archive_markers() {
+        let claim = execute("meta.claim", &json!({}));
+        assert_eq!(
+            claim["result"]["capabilities"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .any(|cap| cap == "archive"),
+            true
+        );
+
+        let result = execute(
+            "archive.apply",
+            &json!({
+                "frontmatter": {
+                    "title": "Archive me",
+                    "status": "open",
+                    "tags": ["task"]
+                },
+                "mode": "tag"
+            }),
+        );
+
+        assert_eq!(result["ok"].as_bool(), Some(true));
+        assert_eq!(result["result"]["deleted"].as_bool(), Some(false));
+        assert_eq!(
+            result["result"]["frontmatter"]["archived"].as_bool(),
+            Some(true)
+        );
+        assert!(result["result"]["frontmatter"]["tags"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .any(|tag| tag == "archived"));
+    }
 }

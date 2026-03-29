@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "cargo build",
-    "conformance:test": "npm --prefix ../tasknotes-spec run conformance:test:mdbase-tasknotes",
-    "conformance:test:bridge": "cargo build && TASKNOTES_ADAPTER=../tasknotes-tui/js/tasknotes-spec-adapter.mjs npm --prefix ../tasknotes-spec run conformance:test"
+    "conformance:test": "cargo build && TASKNOTES_ADAPTER=../tasknotes-tui/js/tasknotes-spec-adapter.mjs npm --prefix ../tasknotes-spec run conformance:test",
+    "conformance:test:rust": "cargo build && TASKNOTES_TUI_BRIDGE_MODE=rust TASKNOTES_ADAPTER=../tasknotes-tui/js/tasknotes-spec-adapter.mjs npm --prefix ../tasknotes-spec run conformance:test",
+    "conformance:test:reference": "npm --prefix ../tasknotes-spec run conformance:test:mdbase-tasknotes"
   }
 }

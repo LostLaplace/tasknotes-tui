@@ -1,8 +1,6 @@
 use serde_json::{json, Map, Value};
 
-use crate::date::{
-    get_date_part, has_time_component, is_before_date_safe, parse_date_to_utc,
-};
+use crate::date::{get_date_part, has_time_component, is_before_date_safe, parse_date_to_utc};
 use crate::field_mapping::{
     build_field_mapping, is_completed_status, normalize_frontmatter, resolve_display_title,
 };
@@ -101,18 +99,24 @@ pub fn validate_core(input: &Map<String, Value>, reject_unknown_fields: bool) ->
             );
         } else if let Some(entries) = value.as_array() {
             if let Err(error) = validate_time_entries_impl(entries) {
-            add_issue(
-                &mut issues,
-                &error,
-                "error",
-                field_name(&mapping.role_to_field, "timeEntries"),
-                error.clone(),
-            );
+                add_issue(
+                    &mut issues,
+                    &error,
+                    "error",
+                    field_name(&mapping.role_to_field, "timeEntries"),
+                    error.clone(),
+                );
+            }
         }
     }
-    }
 
-    for role in ["due", "scheduled", "completedDate", "dateCreated", "dateModified"] {
+    for role in [
+        "due",
+        "scheduled",
+        "completedDate",
+        "dateCreated",
+        "dateModified",
+    ] {
         let Some(value) = normalized.get(role).and_then(Value::as_str) else {
             continue;
         };
@@ -178,12 +182,17 @@ pub fn validate_core(input: &Map<String, Value>, reject_unknown_fields: bool) ->
     }
 
     for key in frontmatter.keys() {
-        let known = mapping.field_to_role.contains_key(key) || mapping.role_to_field.contains_key(key);
+        let known =
+            mapping.field_to_role.contains_key(key) || mapping.role_to_field.contains_key(key);
         if !known {
             add_issue(
                 &mut issues,
                 "unknown_field",
-                if reject_unknown_fields { "error" } else { "info" },
+                if reject_unknown_fields {
+                    "error"
+                } else {
+                    "info"
+                },
                 key.clone(),
                 "field is not mapped to a known semantic role".to_string(),
             );
@@ -256,13 +265,7 @@ fn validate_time_entries_impl(entries: &[Value]) -> Result<(), String> {
     Ok(())
 }
 
-fn add_issue(
-    issues: &mut Vec<Value>,
-    code: &str,
-    severity: &str,
-    field: String,
-    message: String,
-) {
+fn add_issue(issues: &mut Vec<Value>, code: &str, severity: &str, field: String, message: String) {
     issues.push(json!({
         "code": code,
         "severity": severity,

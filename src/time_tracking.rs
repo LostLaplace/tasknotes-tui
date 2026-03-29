@@ -10,7 +10,9 @@ fn canonical_instant(value: chrono::DateTime<chrono::Utc>) -> String {
     value.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-pub fn normalize_and_validate_time_entries(entries_input: &[Value]) -> anyhow::Result<Vec<Map<String, Value>>> {
+pub fn normalize_and_validate_time_entries(
+    entries_input: &[Value],
+) -> anyhow::Result<Vec<Map<String, Value>>> {
     let mut normalized = Vec::new();
     let mut active_count = 0;
 
@@ -27,10 +29,7 @@ pub fn normalize_and_validate_time_entries(entries_input: &[Value]) -> anyhow::R
         let start = parse_iso_instant(start_text, "invalid_time_entry_start")?;
 
         let mut entry = Map::new();
-        entry.insert(
-            "startTime".into(),
-            Value::String(canonical_instant(start)),
-        );
+        entry.insert("startTime".into(), Value::String(canonical_instant(start)));
 
         match object.get("endTime") {
             None | Some(Value::Null) => active_count += 1,
@@ -66,10 +65,7 @@ pub fn start(entries_input: &[Value], now: Option<&str>) -> anyhow::Result<Value
         None => chrono::Utc::now(),
     };
     let now = canonical_instant(now);
-    let mut next = entries
-        .into_iter()
-        .map(Value::Object)
-        .collect::<Vec<_>>();
+    let mut next = entries.into_iter().map(Value::Object).collect::<Vec<_>>();
     next.push(json!({ "startTime": now }));
     Ok(json!({
         "value": next,
@@ -79,7 +75,10 @@ pub fn start(entries_input: &[Value], now: Option<&str>) -> anyhow::Result<Value
 
 pub fn stop(entries_input: &[Value], now: Option<&str>) -> anyhow::Result<Value> {
     let mut entries = normalize_and_validate_time_entries(entries_input)?;
-    let Some(active_index) = entries.iter().position(|entry| !entry.contains_key("endTime")) else {
+    let Some(active_index) = entries
+        .iter()
+        .position(|entry| !entry.contains_key("endTime"))
+    else {
         anyhow::bail!("no_active_time_entry");
     };
 
@@ -105,10 +104,15 @@ pub fn stop(entries_input: &[Value], now: Option<&str>) -> anyhow::Result<Value>
     }))
 }
 
-pub fn replace_entries(entries_input: &[Value], date_modified: Option<&str>) -> anyhow::Result<Value> {
+pub fn replace_entries(
+    entries_input: &[Value],
+    date_modified: Option<&str>,
+) -> anyhow::Result<Value> {
     let entries = normalize_and_validate_time_entries(entries_input)?;
     let modified = match date_modified {
-        Some(value) if !value.trim().is_empty() => canonical_instant(parse_iso_instant(value, "invalid_date_modified")?),
+        Some(value) if !value.trim().is_empty() => {
+            canonical_instant(parse_iso_instant(value, "invalid_date_modified")?)
+        }
         _ => canonical_instant(chrono::Utc::now()),
     };
     Ok(json!({
@@ -123,15 +127,14 @@ pub fn remove_entry(
     date_modified: Option<&str>,
 ) -> anyhow::Result<Value> {
     let entries = normalize_and_validate_time_entries(entries_input)?;
-    let index = selector
-        .get("index")
-        .and_then(Value::as_i64)
-        .unwrap_or(-1);
+    let index = selector.get("index").and_then(Value::as_i64).unwrap_or(-1);
     if index < 0 || index as usize >= entries.len() {
         anyhow::bail!("time_entry_not_found");
     }
     let modified = match date_modified {
-        Some(value) if !value.trim().is_empty() => canonical_instant(parse_iso_instant(value, "invalid_date_modified")?),
+        Some(value) if !value.trim().is_empty() => {
+            canonical_instant(parse_iso_instant(value, "invalid_date_modified")?)
+        }
         _ => canonical_instant(chrono::Utc::now()),
     };
     Ok(json!({

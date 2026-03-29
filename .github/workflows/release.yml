@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive_ext: tar.gz
+            binary_name: tasknotes-tui
+          - name: macos-x86_64
+            os: macos-13
+            target: x86_64-apple-darwin
+            archive_ext: tar.gz
+            binary_name: tasknotes-tui
+          - name: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            archive_ext: tar.gz
+            binary_name: tasknotes-tui
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive_ext: zip
+            binary_name: tasknotes-tui.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} --bin tasknotes-tui
+
+      - name: Prepare artifact staging
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          STAGE_DIR="dist/tasknotes-tui-${VERSION}-${{ matrix.name }}"
+          mkdir -p "$STAGE_DIR"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "$STAGE_DIR/"
+          cp README.md "$STAGE_DIR/"
+          echo "$STAGE_DIR" > dist/stage-dir.txt
+
+      - name: Package tarball
+        if: matrix.archive_ext == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE_DIR="$(cat dist/stage-dir.txt)"
+          ARCHIVE_PATH="${STAGE_DIR}.tar.gz"
+          tar -C dist -czf "$ARCHIVE_PATH" "$(basename "$STAGE_DIR")"
+          echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> "$GITHUB_ENV"
+
+      - name: Package zip
+        if: matrix.archive_ext == 'zip'
+        shell: pwsh
+        run: |
+          $stageDir = Get-Content dist/stage-dir.txt
+          $archivePath = "$stageDir.zip"
+          Compress-Archive -Path $stageDir -DestinationPath $archivePath -Force
+          "ARCHIVE_PATH=$archivePath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: ${{ env.ARCHIVE_PATH }}
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tasknotes-tui-${{ matrix.name }}
+          path: ${{ env.ARCHIVE_PATH }}

@@ -19,7 +19,7 @@ use ratatui::{
 
 use crate::app::App;
 use crate::date::{get_date_part, today_local};
-use crate::repository::TaskFilter;
+use crate::repository::is_archived_task;
 
 pub fn run(mut app: App) -> Result<()> {
     enable_raw_mode()?;
@@ -42,7 +42,7 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                     break;
                 }
                 if app.take_open_in_editor_request() {
-                    open_selected_in_editor(app)?;
+                    open_selected_in_editor(terminal, app)?;
                 }
             }
         }
@@ -83,51 +83,79 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         return Ok(false);
     }
 
-    match key.code {
-        KeyCode::Char('q') => return Ok(true),
-        KeyCode::Char('h') | KeyCode::Left => app.move_focus_date(-1)?,
-        KeyCode::Char('l') | KeyCode::Right => app.move_focus_date(1)?,
-        KeyCode::PageUp => app.move_focus_date(-7)?,
-        KeyCode::PageDown => app.move_focus_date(7)?,
-        KeyCode::Char('g') => app.reset_focus_date()?,
-        KeyCode::Char('j') | KeyCode::Down => app.next(),
-        KeyCode::Char('k') | KeyCode::Up => app.previous(),
-        KeyCode::Char('r') => app.refresh()?,
-        KeyCode::Char('x') | KeyCode::Char(' ') => app.toggle_selected()?,
-        KeyCode::Char('S') => app.skip_selected_today()?,
-        KeyCode::Char('1') => app.set_filter(TaskFilter::Open)?,
-        KeyCode::Char('2') => app.set_filter(TaskFilter::Today)?,
-        KeyCode::Char('3') => app.set_filter(TaskFilter::Overdue)?,
-        KeyCode::Char('4') => app.set_filter(TaskFilter::All)?,
-        KeyCode::Char('5') => app.set_filter(TaskFilter::Tracked)?,
-        KeyCode::Char('n') => app.begin_create(),
-        KeyCode::Char('/') => app.begin_search(),
-        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.begin_command_palette()
-        }
-        KeyCode::Char('e') => app.begin_edit_title(),
-        KeyCode::Char('i') => app.request_open_in_editor(),
-        KeyCode::Char('d') => app.begin_edit_due(),
-        KeyCode::Char('s') => app.begin_edit_scheduled(),
-        KeyCode::Char('T') => app.toggle_selected_time_tracking()?,
-        KeyCode::Char('p') => app.begin_edit_priority(),
-        KeyCode::Char('t') => app.begin_edit_status(),
-        KeyCode::Char('R') => app.begin_edit_recurrence(),
-        KeyCode::Char('A') => app.begin_edit_recurrence_anchor(),
-        _ => {}
+    let keys = &app.tui_config.keybinds;
+    if binding_matches(key, &keys.quit) {
+        return Ok(true);
+    } else if binding_matches(key, &keys.focus_prev_day) {
+        app.move_focus_date(-1)?;
+    } else if binding_matches(key, &keys.focus_next_day) {
+        app.move_focus_date(1)?;
+    } else if binding_matches(key, &keys.focus_prev_week) {
+        app.move_focus_date(-7)?;
+    } else if binding_matches(key, &keys.focus_next_week) {
+        app.move_focus_date(7)?;
+    } else if binding_matches(key, &keys.focus_today) {
+        app.reset_focus_date()?;
+    } else if binding_matches(key, &keys.next_task) {
+        app.next();
+    } else if binding_matches(key, &keys.prev_task) {
+        app.previous();
+    } else if binding_matches(key, &keys.refresh) {
+        app.refresh()?;
+    } else if binding_matches(key, &keys.toggle_complete) {
+        app.toggle_selected()?;
+    } else if binding_matches(key, &keys.toggle_archive) {
+        app.toggle_selected_archive()?;
+    } else if binding_matches(key, &keys.toggle_skip_recurring) {
+        app.skip_selected_today()?;
+    } else if let Some(slot) = numeric_view_slot(key) {
+        app.activate_view_slot(slot)?;
+    } else if binding_matches(key, &keys.create_task) {
+        app.begin_create();
+    } else if binding_matches(key, &keys.search) {
+        app.begin_search();
+    } else if binding_matches(key, &keys.command_palette) {
+        app.begin_command_palette();
+    } else if binding_matches(key, &keys.edit_title) {
+        app.begin_edit_title();
+    } else if binding_matches(key, &keys.open_in_editor) {
+        app.request_open_in_editor();
+    } else if binding_matches(key, &keys.edit_due) {
+        app.begin_edit_due();
+    } else if binding_matches(key, &keys.edit_scheduled) {
+        app.begin_edit_scheduled();
+    } else if binding_matches(key, &keys.toggle_time_tracking) {
+        app.toggle_selected_time_tracking()?;
+    } else if binding_matches(key, &keys.edit_priority) {
+        app.begin_edit_priority();
+    } else if binding_matches(key, &keys.edit_status) {
+        app.begin_edit_status();
+    } else if binding_matches(key, &keys.edit_recurrence) {
+        app.begin_edit_recurrence();
+    } else if binding_matches(key, &keys.edit_recurrence_anchor) {
+        app.begin_edit_recurrence_anchor();
     }
     Ok(false)
 }
 
 fn draw(frame: &mut Frame<'_>, app: &App) {
+    let has_input = app.input_prompt().is_some();
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(10),
-            Constraint::Length(3),
-            Constraint::Length(2),
-        ])
+        .constraints(if has_input {
+            vec![
+                Constraint::Length(3),
+                Constraint::Min(10),
+                Constraint::Length(3),
+                Constraint::Length(2),
+            ]
+        } else {
+            vec![
+                Constraint::Length(3),
+                Constraint::Min(10),
+                Constraint::Length(2),
+            ]
+        })
         .split(frame.area());
 
     let body = Layout::default()
@@ -148,7 +176,13 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         ),
         Span::raw("  "),
         Span::styled(
-            format!("Filter: {}", filter_label(app.filter)),
+            format!(
+                "View {}: {}",
+                app.current_view_slot,
+                app.current_view()
+                    .map(|view| view.label.as_str())
+                    .unwrap_or("Unknown")
+            ),
             Style::default().fg(Color::Cyan),
         ),
         Span::raw("  "),
@@ -176,14 +210,20 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
         .tasks
         .iter()
         .map(|task| {
-            let mut line = vec![Span::styled(
-                format!("{:<12}", task.status),
-                Style::default().fg(if task.status == "done" || task.status == "cancelled" {
-                    Color::Green
-                } else {
-                    Color::Cyan
-                }),
-            )];
+            let is_archived = is_archived_task(task, &app.repo.config.archive);
+            let status_style = if is_archived {
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM)
+            } else if task.status == "done" || task.status == "cancelled" {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
+            let mut line = vec![Span::styled(format!("{:<12}", task.status), status_style)];
+            if is_archived {
+                line.push(Span::styled(" A ", Style::default().fg(Color::DarkGray)));
+            }
             if task
                 .normalized_frontmatter
                 .get("recurrence")
@@ -219,7 +259,10 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     }
     frame.render_stateful_widget(list, body[0], &mut state);
 
-    frame.render_widget(draw_calendar(&app.focus_date, &app.calendar_tasks), right[0]);
+    frame.render_widget(
+        draw_calendar(&app.focus_date, &app.calendar_tasks),
+        right[0],
+    );
 
     let details = if let Some(task) = app.selected_task() {
         let recurring = task
@@ -257,10 +300,16 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
                     .join(", ")
             })
             .unwrap_or_default();
+        let archived = if is_archived_task(task, &app.repo.config.archive) {
+            "yes"
+        } else {
+            "no"
+        };
         Paragraph::new(format!(
-            "Path: {}\nStatus: {}\nPriority: {}\nScheduled: {}\nDue: {}\nTracking: {}\nRecurring: {}\nRecurrence anchor: {}\nCompleted instances: {}\nSkipped instances: {}\n\n{}",
+            "Path: {}\nStatus: {}\nArchived: {}\nPriority: {}\nScheduled: {}\nDue: {}\nTracking: {}\nRecurring: {}\nRecurrence anchor: {}\nCompleted instances: {}\nSkipped instances: {}\n\n{}",
             task.path,
             task.status,
+            archived,
             task.priority.clone().unwrap_or_default(),
             task.scheduled.clone().unwrap_or_default(),
             task.due.clone().unwrap_or_default(),
@@ -278,20 +327,21 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     .wrap(Wrap { trim: false });
     frame.render_widget(details, right[1]);
 
-    let input = if let Some(prompt) = app.input_prompt() {
-        Paragraph::new(app.input_value.clone()).block(
+    if let Some(prompt) = app.input_prompt() {
+        let input = Paragraph::new(app.input_value.clone()).block(
             Block::default()
                 .title(format!("{prompt} (Enter submit, Esc cancel)"))
                 .borders(Borders::ALL),
-        )
-    } else {
-        Paragraph::new("Keys: Ctrl-P palette  h/l or <-/-> date  PgUp/PgDn week  g today  1-5 filters  / search  n create  i editor  T track  x toggle  q quit")
-            .block(Block::default().borders(Borders::ALL))
-    };
-    frame.render_widget(input, layout[2]);
+        );
+        frame.render_widget(input, layout[2]);
+    }
 
     let status = Paragraph::new(app.status.clone()).block(Block::default().borders(Borders::ALL));
-    frame.render_widget(status, layout[3]);
+    if has_input {
+        frame.render_widget(status, layout[3]);
+    } else {
+        frame.render_widget(status, layout[2]);
+    }
 
     if app.is_palette_active() {
         draw_command_palette(frame, app);
@@ -301,17 +351,10 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
     }
 }
 
-fn filter_label(filter: TaskFilter) -> &'static str {
-    match filter {
-        TaskFilter::All => "All",
-        TaskFilter::Open => "Open",
-        TaskFilter::Today => "Date",
-        TaskFilter::Overdue => "Overdue",
-        TaskFilter::Tracked => "Tracked",
-    }
-}
-
-fn draw_calendar(focus_date: &str, calendar_tasks: &[crate::repository::TaskRecord]) -> Paragraph<'static> {
+fn draw_calendar(
+    focus_date: &str,
+    calendar_tasks: &[crate::repository::TaskRecord],
+) -> Paragraph<'static> {
     let focus = NaiveDate::parse_from_str(focus_date, "%Y-%m-%d")
         .ok()
         .unwrap_or_else(|| {
@@ -327,10 +370,7 @@ fn draw_calendar(focus_date: &str, calendar_tasks: &[crate::repository::TaskReco
     };
     let days_in_month = next_month.pred_opt().map(|date| date.day()).unwrap_or(30);
 
-    let mut lines = vec![
-        Line::from(month_name),
-        Line::from("Mo Tu We Th Fr Sa Su"),
-    ];
+    let mut lines = vec![Line::from(month_name), Line::from("Mo Tu We Th Fr Sa Su")];
 
     let mut day = 1u32;
     for week in 0..6 {
@@ -341,18 +381,17 @@ fn draw_calendar(focus_date: &str, calendar_tasks: &[crate::repository::TaskReco
                 spans.push(Span::raw("   "));
                 continue;
             }
-            let date = NaiveDate::from_ymd_opt(focus.year(), focus.month(), day).expect("valid date");
+            let date =
+                NaiveDate::from_ymd_opt(focus.year(), focus.month(), day).expect("valid date");
             let ymd = date.format("%Y-%m-%d").to_string();
-            let has_tasks = calendar_tasks
-                .iter()
-                .any(|task| {
-                    task.scheduled
-                        .as_deref()
-                        .map(get_date_part)
-                        .or_else(|| task.due.as_deref().map(get_date_part))
-                        .map(|value| value == ymd)
-                        .unwrap_or(false)
-                });
+            let has_tasks = calendar_tasks.iter().any(|task| {
+                task.scheduled
+                    .as_deref()
+                    .map(get_date_part)
+                    .or_else(|| task.due.as_deref().map(get_date_part))
+                    .map(|value| value == ymd)
+                    .unwrap_or(false)
+            });
             let mut label = format!("{day:>2}");
             if has_tasks {
                 label.push('*');
@@ -365,7 +404,9 @@ fn draw_calendar(focus_date: &str, calendar_tasks: &[crate::repository::TaskReco
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD)
             } else if ymd == today_local() {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else if has_tasks {
                 Style::default().fg(Color::Cyan)
             } else {
@@ -412,11 +453,23 @@ fn draw_command_palette(frame: &mut Frame<'_>, app: &App) {
     let list_items: Vec<ListItem> = items
         .iter()
         .map(|item| {
-            ListItem::new(Line::from(vec![
-                Span::styled(item.title, Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw("  "),
-                Span::styled(item.description, Style::default().fg(Color::DarkGray)),
-            ]))
+            let mut spans = vec![Span::styled(
+                item.title.as_str(),
+                Style::default().add_modifier(Modifier::BOLD),
+            )];
+            if let Some(hotkey) = item.hotkey.as_deref() {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(
+                    format!("[{hotkey}]"),
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                item.description.as_str(),
+                Style::default().fg(Color::DarkGray),
+            ));
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
@@ -440,18 +493,23 @@ fn draw_command_palette(frame: &mut Frame<'_>, app: &App) {
         layout[0],
     );
     frame.render_stateful_widget(
-        List::new(list_items).block(Block::default().title("Commands").borders(Borders::ALL)).highlight_style(
-            Style::default()
-                .bg(Color::Blue)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
+        List::new(list_items)
+            .block(Block::default().title("Commands").borders(Borders::ALL))
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Blue)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
         layout[1],
         &mut state,
     );
     frame.render_widget(
         Paragraph::new(
-            "Ctrl-P open  Up/Down move  Enter run  Esc cancel\nFilters: open date overdue all tracked  Actions: create editor search refresh toggle track skip",
+            format!(
+                "Ctrl-P open  Up/Down move  Enter run  Esc cancel\nEntries show their normal hotkey in [brackets]. Views: {}",
+                palette_view_help(app)
+            ),
         )
         .wrap(Wrap { trim: false })
         .block(Block::default().title("Help").borders(Borders::ALL)),
@@ -459,7 +517,25 @@ fn draw_command_palette(frame: &mut Frame<'_>, app: &App) {
     );
 }
 
-fn open_selected_in_editor(app: &mut App) -> Result<()> {
+fn palette_view_help(app: &App) -> String {
+    let labels: Vec<String> = app
+        .available_view_slots()
+        .into_iter()
+        .filter_map(|slot| {
+            app.tui_config
+                .views
+                .get(&slot)
+                .map(|view| format!("{slot}:{}", view.label))
+        })
+        .collect();
+    if labels.is_empty() {
+        "none configured".to_string()
+    } else {
+        labels.join("  ")
+    }
+}
+
+fn open_selected_in_editor(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     let Some(path) = app.selected_task_absolute_path() else {
         app.status = "No task selected".to_string();
         return Ok(());
@@ -499,10 +575,12 @@ fn open_selected_in_editor(app: &mut App) -> Result<()> {
 
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
+    terminal.clear()?;
+    terminal.autoresize()?;
 
     match status {
         Ok(exit) => {
-            app.reload_from_disk()?;
+            app.refresh_selected_task()?;
             if exit.success() {
                 app.status = format!("Opened {}", path.display());
             } else {
@@ -549,12 +627,17 @@ fn draw_date_picker(frame: &mut Frame<'_>, app: &App) {
         layout[0],
     );
 
-    frame.render_widget(draw_calendar(&app.picker_date, &app.calendar_tasks), layout[1]);
+    frame.render_widget(
+        draw_calendar(&app.picker_date, &app.calendar_tasks),
+        layout[1],
+    );
 
     frame.render_widget(
-        Paragraph::new("Arrows move  H/L month  t today  c clear  / type ISO  Enter save  Esc cancel")
-            .block(Block::default().title("Help").borders(Borders::ALL))
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(
+            "Arrows move  H/L month  t today  c clear  / type ISO  Enter save  Esc cancel",
+        )
+        .block(Block::default().title("Help").borders(Borders::ALL))
+        .wrap(Wrap { trim: false }),
         layout[2],
     );
 }
@@ -576,4 +659,40 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+fn numeric_view_slot(key: KeyEvent) -> Option<u8> {
+    match key.code {
+        KeyCode::Char(ch) if ('1'..='9').contains(&ch) => Some(ch as u8 - b'0'),
+        _ => None,
+    }
+}
+
+fn binding_matches(key: KeyEvent, binding: &str) -> bool {
+    let normalized = binding.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "enter" => key.code == KeyCode::Enter,
+        "esc" | "escape" => key.code == KeyCode::Esc,
+        "left" => key.code == KeyCode::Left,
+        "right" => key.code == KeyCode::Right,
+        "up" => key.code == KeyCode::Up,
+        "down" => key.code == KeyCode::Down,
+        "pageup" => key.code == KeyCode::PageUp,
+        "pagedown" => key.code == KeyCode::PageDown,
+        "space" => key.code == KeyCode::Char(' '),
+        _ if normalized.starts_with("ctrl-") => {
+            let expected = normalized.trim_start_matches("ctrl-");
+            matches!(key.code, KeyCode::Char(ch) if expected == ch.to_string())
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+        }
+        _ if normalized.starts_with("shift-") => {
+            let expected = normalized.trim_start_matches("shift-");
+            matches!(key.code, KeyCode::Char(ch) if expected == ch.to_ascii_lowercase().to_string())
+                && key.modifiers.contains(KeyModifiers::SHIFT)
+        }
+        _ if normalized.len() == 1 => {
+            matches!(key.code, KeyCode::Char(ch) if normalized == ch.to_ascii_lowercase().to_string())
+        }
+        _ => false,
+    }
 }

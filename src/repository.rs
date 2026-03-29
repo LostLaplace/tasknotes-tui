@@ -2,10 +2,12 @@ use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
+use mdbase::types::schema::TypeDef;
 use mdbase::Collection;
 use serde_json::{json, Map, Value};
 
-use crate::config::{detect_task_file, load_effective_config, EffectiveConfig};
+use crate::config::{load_effective_config, ArchiveConfig, EffectiveConfig};
+use crate::create_compat::create_task_with_compat;
 use crate::date::{get_date_part, is_before_date_safe, today_local};
 use crate::field_mapping::{
     default_completed_status, denormalize_frontmatter, field_mapping_from_config,
@@ -13,6 +15,7 @@ use crate::field_mapping::{
 };
 use crate::recurrence::{complete as complete_recurring, RecurrenceInput};
 use crate::time_tracking;
+use crate::view_query::ViewEvalSupport;
 
 #[derive(Debug, Clone)]
 pub struct TaskRecord {
@@ -75,11 +78,20 @@ impl TaskRepository {
             .map_err(|error| anyhow!("failed to open mdbase collection: {}", error))
     }
 
+    pub fn build_view_eval_support(&self) -> anyhow::Result<ViewEvalSupport> {
+        let collection = self.collection()?;
+        Ok(ViewEvalSupport::build(&collection))
+    }
+
     pub fn absolute_task_path(&self, task: &TaskRecord) -> PathBuf {
         self.root.join(&task.path)
     }
 
-    pub fn list_tasks(&self, filter: TaskFilter, reference_date: &str) -> anyhow::Result<Vec<TaskRecord>> {
+    pub fn list_tasks(
+        &self,
+        filter: TaskFilter,
+        reference_date: &str,
+    ) -> anyhow::Result<Vec<TaskRecord>> {
         let collection = self.collection()?;
         let query = collection.query(&json!({
             "query": {
@@ -109,9 +121,6 @@ impl TaskRepository {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            if !detect_task_file(&self.config.task_detection, &raw, &body, &path) {
-                continue;
-            }
             let normalized = normalize_frontmatter(&raw, &self.field_mapping);
             let title = resolve_display_title(&normalized, &self.field_mapping, Some(&path))
                 .unwrap_or_else(|| path.clone());
@@ -150,7 +159,13 @@ impl TaskRepository {
                 normalized_frontmatter: normalized,
                 raw_frontmatter: raw,
             };
-            if matches_filter(&task, filter, &self.field_mapping, reference_date) {
+            if matches_filter(
+                &task,
+                filter,
+                &self.field_mapping,
+                &self.config.archive,
+                reference_date,
+            ) {
                 tasks.push(task);
             }
         }
@@ -236,7 +251,7 @@ impl TaskRepository {
         })
     }
 
-    pub fn toggle_time_tracking(&self, task: &TaskRecord) -> anyhow::Result<()> {
+    pub fn toggle_time_tracking(&self, task: &TaskRecord) -> anyhow::Result<TaskRecord> {
         let mut normalized = self.read_task(&task.path)?.normalized_frontmatter;
         let entries = normalized
             .get("timeEntries")
@@ -257,7 +272,7 @@ impl TaskRepository {
         self.write_task_update(task, normalized)
     }
 
-    pub fn toggle_complete(&self, task: &TaskRecord) -> anyhow::Result<()> {
+    pub fn toggle_complete(&self, task: &TaskRecord) -> anyhow::Result<TaskRecord> {
         let collection = self.collection()?;
         let mut normalized = task.normalized_frontmatter.clone();
         let is_recurring = normalized
@@ -348,10 +363,10 @@ impl TaskRepository {
         if let Some(error) = result.get("error") {
             return Err(anyhow!("update failed: {}", error));
         }
-        Ok(())
+        self.read_task(&task.path)
     }
 
-    pub fn toggle_skip_today(&self, task: &TaskRecord) -> anyhow::Result<()> {
+    pub fn toggle_skip_today(&self, task: &TaskRecord) -> anyhow::Result<TaskRecord> {
         let mut normalized = task.normalized_frontmatter.clone();
         let is_recurring = normalized
             .get("recurrence")
@@ -398,22 +413,16 @@ impl TaskRepository {
         self.write_task_update(task, normalized)
     }
 
-    pub fn create_task(&self, title: &str) -> anyhow::Result<()> {
+    pub fn create_task(&self, title: &str) -> anyhow::Result<TaskRecord> {
         self.create_task_from_draft(&TaskDraft {
             title: title.to_string(),
             ..TaskDraft::default()
         })
     }
 
-    pub fn create_task_from_draft(&self, draft: &TaskDraft) -> anyhow::Result<()> {
+    pub fn create_task_from_draft(&self, draft: &TaskDraft) -> anyhow::Result<TaskRecord> {
         let collection = self.collection()?;
         anyhow::ensure!(!draft.title.trim().is_empty(), "title must not be empty");
-        let slug = slugify(&draft.title);
-        let path = format!(
-            "{}/{}.md",
-            self.config.task_detection.default_folder.trim_matches('/'),
-            slug
-        );
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let mut fields = Map::new();
         fields.insert(
@@ -501,21 +510,55 @@ impl TaskRepository {
                 .get("date_modified")
                 .cloned()
                 .unwrap_or_else(|| "dateModified".into()),
-            Value::String(now),
+            Value::String(now.clone()),
         );
+        let compat = collection
+            .types
+            .get("task")
+            .map(type_def_to_create_compat)
+            .and_then(|task_type| {
+                create_task_with_compat(&json!({
+                    "taskType": task_type,
+                    "frontmatter": Value::Object(fields.clone()),
+                    "body": draft.details,
+                    "fixedNow": now,
+                }))
+                .ok()
+            });
+        let path = compat
+            .as_ref()
+            .and_then(|result| result.get("path").and_then(Value::as_str))
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                let slug = slugify(&draft.title);
+                format!(
+                    "{}/{}.md",
+                    self.config.task_detection.default_folder.trim_matches('/'),
+                    slug
+                )
+            });
+        let create_fields = compat
+            .as_ref()
+            .and_then(|result| result.get("frontmatter").and_then(Value::as_object))
+            .cloned()
+            .unwrap_or(fields);
+        let create_body = compat
+            .as_ref()
+            .and_then(|result| result.get("body").and_then(Value::as_str))
+            .unwrap_or(&draft.details);
         let result = collection.create(&json!({
             "path": path,
             "type": "task",
-            "fields": Value::Object(fields),
-            "body": draft.details,
+            "fields": Value::Object(create_fields),
+            "body": create_body,
         }));
         if let Some(error) = result.get("error") {
             return Err(anyhow!("create failed: {}", error));
         }
-        Ok(())
+        self.read_task(&path)
     }
 
-    pub fn update_title(&self, task: &TaskRecord, title: &str) -> anyhow::Result<()> {
+    pub fn update_title(&self, task: &TaskRecord, title: &str) -> anyhow::Result<TaskRecord> {
         let title = title.trim();
         anyhow::ensure!(!title.is_empty(), "title must not be empty");
         let collection = self.collection()?;
@@ -533,6 +576,7 @@ impl TaskRepository {
         if let Some(error) = result.get("error") {
             return Err(anyhow!("update failed: {}", error));
         }
+        let mut current_path = task.path.clone();
         if let Some(new_path) = maybe_new_path {
             if new_path != task.path {
                 let rename_result = collection.rename(&json!({
@@ -543,9 +587,10 @@ impl TaskRepository {
                 if let Some(error) = rename_result.get("error") {
                     return Err(anyhow!("rename failed: {}", error));
                 }
+                current_path = new_path;
             }
         }
-        Ok(())
+        self.read_task(&current_path)
     }
 
     pub fn update_date_field(
@@ -553,7 +598,7 @@ impl TaskRepository {
         task: &TaskRecord,
         field: &str,
         value: Option<&str>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<TaskRecord> {
         let mut normalized = self.read_task(&task.path)?.normalized_frontmatter;
         match value.map(str::trim).filter(|value| !value.is_empty()) {
             Some(value) => {
@@ -571,7 +616,7 @@ impl TaskRepository {
         task: &TaskRecord,
         field: &str,
         value: Option<&str>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<TaskRecord> {
         let mut normalized = self.read_task(&task.path)?.normalized_frontmatter;
         match value.map(str::trim).filter(|value| !value.is_empty()) {
             Some(value) => {
@@ -584,11 +629,83 @@ impl TaskRepository {
         self.write_task_update(task, normalized)
     }
 
+    pub fn toggle_archive(&self, task: &TaskRecord) -> anyhow::Result<TaskRecord> {
+        if is_archived_task(task, &self.config.archive) {
+            self.unarchive_task(task)
+        } else {
+            self.archive_task(task)
+        }
+    }
+
+    fn archive_task(&self, task: &TaskRecord) -> anyhow::Result<TaskRecord> {
+        let collection = self.collection()?;
+        let mut normalized = self.read_task(&task.path)?.normalized_frontmatter;
+        ensure_archive_markers(&mut normalized, &self.config.archive);
+        normalized.insert(
+            "dateModified".into(),
+            Value::String(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        );
+        let fields = denormalize_frontmatter(&normalized, &self.field_mapping);
+        let result = collection.update(&json!({ "path": task.path, "fields": fields }));
+        if let Some(error) = result.get("error") {
+            return Err(anyhow!("update failed: {}", error));
+        }
+
+        let mut current_path = task.path.clone();
+        if self.config.archive.move_on_archive {
+            let target = archived_path_for_task(task, &self.config.archive);
+            if target != task.path {
+                let rename_result = collection.rename(&json!({
+                    "from": task.path,
+                    "to": target,
+                    "update_refs": true
+                }));
+                if let Some(error) = rename_result.get("error") {
+                    return Err(anyhow!("rename failed: {}", error));
+                }
+                current_path = target;
+            }
+        }
+        self.read_task(&current_path)
+    }
+
+    fn unarchive_task(&self, task: &TaskRecord) -> anyhow::Result<TaskRecord> {
+        let collection = self.collection()?;
+        let mut current = self.read_task(&task.path)?;
+        clear_archive_markers(&mut current.normalized_frontmatter, &self.config.archive);
+        current.normalized_frontmatter.insert(
+            "dateModified".into(),
+            Value::String(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        );
+        let fields = denormalize_frontmatter(&current.normalized_frontmatter, &self.field_mapping);
+        let result = collection.update(&json!({ "path": current.path, "fields": fields }));
+        if let Some(error) = result.get("error") {
+            return Err(anyhow!("update failed: {}", error));
+        }
+
+        let mut current_path = current.path.clone();
+        if self.config.archive.move_on_archive {
+            let target = unarchived_path_for_task(&current, &self.config);
+            if target != current.path {
+                let rename_result = collection.rename(&json!({
+                    "from": current.path,
+                    "to": target,
+                    "update_refs": true
+                }));
+                if let Some(error) = rename_result.get("error") {
+                    return Err(anyhow!("rename failed: {}", error));
+                }
+                current_path = target;
+            }
+        }
+        self.read_task(&current_path)
+    }
+
     fn write_task_update(
         &self,
         task: &TaskRecord,
         mut normalized: Map<String, Value>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<TaskRecord> {
         let collection = self.collection()?;
         normalized.insert(
             "dateModified".into(),
@@ -599,8 +716,35 @@ impl TaskRepository {
         if let Some(error) = result.get("error") {
             return Err(anyhow!("update failed: {}", error));
         }
-        Ok(())
+        self.read_task(&task.path)
     }
+}
+
+fn type_def_to_create_compat(type_def: &TypeDef) -> Value {
+    let mut fields = Map::new();
+    for (name, def) in &type_def.fields {
+        let mut field = Map::new();
+        if let Some(default) = &def.default {
+            field.insert("default".into(), default.clone());
+        }
+        fields.insert(name.clone(), Value::Object(field));
+    }
+
+    let mut out = Map::new();
+    if let Some(path_pattern) = &type_def.path_pattern {
+        out.insert("path_pattern".into(), Value::String(path_pattern.clone()));
+    }
+    if let Some(match_rules) = &type_def.match_rules {
+        let mut match_obj = Map::new();
+        if let Some(where_clause) = &match_rules.where_clause {
+            match_obj.insert("where".into(), where_clause.clone());
+        }
+        if !match_obj.is_empty() {
+            out.insert("match".into(), Value::Object(match_obj));
+        }
+    }
+    out.insert("fields".into(), Value::Object(fields));
+    Value::Object(out)
 }
 
 fn slugify(value: &str) -> String {
@@ -630,15 +774,130 @@ fn rename_task_path(old_path: &str, title: &str) -> String {
     }
 }
 
+pub fn is_archived_task(task: &TaskRecord, archive: &ArchiveConfig) -> bool {
+    task.normalized_frontmatter
+        .get(&archive.field)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || task
+            .normalized_frontmatter
+            .get("tags")
+            .map(|value| tags_contain_archive_tag(value, &archive.tag))
+            .unwrap_or(false)
+        || is_path_in_folder(&task.path, &archive.folder)
+}
+
+fn tags_contain_archive_tag(value: &Value, archive_tag: &str) -> bool {
+    let archive_tag = archive_tag.trim();
+    if archive_tag.is_empty() {
+        return false;
+    }
+    let with_hash = format!("#{archive_tag}");
+    match value {
+        Value::Array(values) => values.iter().filter_map(Value::as_str).any(|tag| {
+            tag.eq_ignore_ascii_case(archive_tag) || tag.eq_ignore_ascii_case(&with_hash)
+        }),
+        Value::String(value) => value.split(',').map(str::trim).any(|tag| {
+            tag.eq_ignore_ascii_case(archive_tag) || tag.eq_ignore_ascii_case(&with_hash)
+        }),
+        _ => false,
+    }
+}
+
+fn ensure_archive_markers(normalized: &mut Map<String, Value>, archive: &ArchiveConfig) {
+    normalized.insert(archive.field.clone(), Value::Bool(true));
+    let mut tags: Vec<String> = normalized.get("tags").map(read_tags).unwrap_or_default();
+    if !archive.tag.trim().is_empty()
+        && !tags.iter().any(|tag| {
+            tag.eq_ignore_ascii_case(&archive.tag)
+                || tag.eq_ignore_ascii_case(&format!("#{}", archive.tag))
+        })
+    {
+        tags.push(archive.tag.clone());
+    }
+    normalized.insert(
+        "tags".into(),
+        Value::Array(tags.into_iter().map(Value::String).collect()),
+    );
+}
+
+fn clear_archive_markers(normalized: &mut Map<String, Value>, archive: &ArchiveConfig) {
+    normalized.insert(archive.field.clone(), Value::Bool(false));
+    let mut tags: Vec<String> = normalized
+        .get("tags")
+        .map(read_tags)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|tag| {
+            !tag.eq_ignore_ascii_case(&archive.tag)
+                && !tag.eq_ignore_ascii_case(&format!("#{}", archive.tag))
+        })
+        .collect();
+    normalized.insert(
+        "tags".into(),
+        Value::Array(tags.drain(..).map(Value::String).collect()),
+    );
+}
+
+fn read_tags(value: &Value) -> Vec<String> {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        Value::String(value) => value
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn is_path_in_folder(path: &str, folder: &str) -> bool {
+    let folder = folder.trim_matches('/').replace('\\', "/");
+    let path = path.trim_start_matches('/').replace('\\', "/");
+    !folder.is_empty() && (path == folder || path.starts_with(&format!("{folder}/")))
+}
+
+fn archived_path_for_task(task: &TaskRecord, archive: &ArchiveConfig) -> String {
+    let file_name = Path::new(&task.path)
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| slugify(&task.title) + ".md");
+    format!("{}/{}", archive.folder.trim_matches('/'), file_name)
+}
+
+fn unarchived_path_for_task(task: &TaskRecord, config: &EffectiveConfig) -> String {
+    let file_name = if config.title.storage == "filename" {
+        format!("{}.md", slugify(&task.title))
+    } else {
+        Path::new(&task.path)
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_else(|| format!("{}.md", slugify(&task.title)))
+    };
+    format!(
+        "{}/{}",
+        config.task_detection.default_folder.trim_matches('/'),
+        file_name
+    )
+}
+
 fn matches_filter(
     task: &TaskRecord,
     filter: TaskFilter,
     mapping: &FieldMapping,
+    archive: &ArchiveConfig,
     reference_date: &str,
 ) -> bool {
     match filter {
         TaskFilter::All => true,
-        TaskFilter::Open => !is_completed_status(mapping, Some(&task.status)),
+        TaskFilter::Open => {
+            !is_completed_status(mapping, Some(&task.status)) && !is_archived_task(task, archive)
+        }
         TaskFilter::Today => task
             .scheduled
             .as_deref()
@@ -818,10 +1077,9 @@ fields:
         recurring
             .normalized_frontmatter
             .insert("recurrence".into(), Value::String("FREQ=DAILY".into()));
-        recurring.normalized_frontmatter.insert(
-            "recurrenceAnchor".into(),
-            Value::String("scheduled".into()),
-        );
+        recurring
+            .normalized_frontmatter
+            .insert("recurrenceAnchor".into(), Value::String("scheduled".into()));
         repo.write_task_update(&recurring, recurring.normalized_frontmatter.clone())
             .unwrap();
         let recurring = repo.read_task(&task[0].path).unwrap();
@@ -915,12 +1173,8 @@ fields:
         })
         .unwrap();
 
-        let april_10 = repo
-            .list_tasks(TaskFilter::Today, "2026-04-10")
-            .unwrap();
-        let april_11 = repo
-            .list_tasks(TaskFilter::Today, "2026-04-11")
-            .unwrap();
+        let april_10 = repo.list_tasks(TaskFilter::Today, "2026-04-10").unwrap();
+        let april_11 = repo.list_tasks(TaskFilter::Today, "2026-04-11").unwrap();
 
         assert_eq!(april_10.len(), 1);
         assert_eq!(april_10[0].title, "Today A");
@@ -961,5 +1215,145 @@ fields:
                 .len(),
             0
         );
+    }
+
+    #[test]
+    fn archived_tasks_are_hidden_from_open_and_can_move_folders() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        fs::write(
+            tmp.path().join("tasknotes.yaml"),
+            r#"task_detection:
+  method: property
+  property_name: status
+  property_value: ""
+archive:
+  move_on_archive: true
+  folder: "TaskNotes/Archive"
+"#,
+        )
+        .unwrap();
+
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task("Archive me").unwrap();
+
+        let open_tasks = repo.list_tasks(TaskFilter::Open, &today_local()).unwrap();
+        assert_eq!(open_tasks.len(), 1);
+
+        repo.toggle_archive(&open_tasks[0]).unwrap();
+
+        let open_tasks = repo.list_tasks(TaskFilter::Open, &today_local()).unwrap();
+        assert!(open_tasks.is_empty());
+
+        let all_tasks = repo.list_tasks(TaskFilter::All, &today_local()).unwrap();
+        assert_eq!(all_tasks.len(), 1);
+        assert_eq!(all_tasks[0].status, "open");
+        assert_eq!(
+            all_tasks[0]
+                .normalized_frontmatter
+                .get("archived")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(all_tasks[0]
+            .normalized_frontmatter
+            .get("tags")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .any(|tag| tag == "archived"));
+        assert!(all_tasks[0].path.starts_with("TaskNotes/Archive/"));
+
+        repo.toggle_archive(&all_tasks[0]).unwrap();
+        let restored = repo.list_tasks(TaskFilter::Open, &today_local()).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].status, "open");
+        assert_eq!(
+            restored[0]
+                .normalized_frontmatter
+                .get("archived")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert!(restored[0].path.starts_with("TaskNotes/Tasks/"));
+    }
+
+    #[test]
+    fn archive_detection_and_writes_are_configurable() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        fs::write(
+            tmp.path().join("tasknotes.yaml"),
+            r#"task_detection:
+  method: property
+  property_name: status
+  property_value: ""
+archive:
+  move_on_archive: false
+  folder: "TaskNotes/Archive"
+  tag: "cold-storage"
+  field: "isArchived"
+"#,
+        )
+        .unwrap();
+
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task("Custom archive").unwrap();
+
+        let open_tasks = repo.list_tasks(TaskFilter::Open, &today_local()).unwrap();
+        assert_eq!(open_tasks.len(), 1);
+        repo.toggle_archive(&open_tasks[0]).unwrap();
+
+        let all_tasks = repo.list_tasks(TaskFilter::All, &today_local()).unwrap();
+        assert_eq!(all_tasks.len(), 1);
+        assert_eq!(
+            all_tasks[0]
+                .normalized_frontmatter
+                .get("isArchived")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(all_tasks[0]
+            .normalized_frontmatter
+            .get("tags")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .any(|tag| tag == "cold-storage"));
+        assert!(repo
+            .list_tasks(TaskFilter::Open, &today_local())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn runtime_ignores_tasknotes_detection_for_membership() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task("Typed task").unwrap();
+
+        fs::create_dir_all(tmp.path().join("notes")).unwrap();
+        fs::write(
+            tmp.path().join("tasknotes.yaml"),
+            r#"task_detection:
+  method: property
+  property_name: "definitely_not_present"
+  property_value: "never"
+"#,
+        )
+        .unwrap();
+
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        let titles: Vec<String> = repo
+            .list_tasks(TaskFilter::All, &today_local())
+            .unwrap()
+            .into_iter()
+            .map(|task| task.title)
+            .collect();
+
+        assert!(titles.iter().any(|title| title == "Typed task"));
     }
 }
