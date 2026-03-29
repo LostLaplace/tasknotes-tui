@@ -1,0 +1,11 @@
+{
+  "name": "tasknotes-tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "cargo build",
+    "conformance:test": "npm --prefix ../tasknotes-spec run conformance:test:mdbase-tasknotes",
+    "conformance:test:bridge": "cargo build && TASKNOTES_ADAPTER=../tasknotes-tui/js/tasknotes-spec-adapter.mjs npm --prefix ../tasknotes-spec run conformance:test"
+  }
+}
