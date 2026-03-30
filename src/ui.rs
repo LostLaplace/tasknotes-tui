@@ -39,6 +39,9 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
         terminal.draw(|frame| draw(frame, app))?;
         if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
+                if key.kind != event::KeyEventKind::Press {
+                    continue;
+                }
                 if handle_key(app, key)? {
                     break;
                 }
