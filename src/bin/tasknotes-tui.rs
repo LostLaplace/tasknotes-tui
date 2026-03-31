@@ -143,6 +143,7 @@ fn seed_demo_vault(root: &Path) -> Result<()> {
             status: Some("doing".into()),
             recurrence: None,
             recurrence_anchor: None,
+            projects: vec![],
         },
         TaskDraft {
             title: "Inbox sweep".into(),
@@ -153,6 +154,7 @@ fn seed_demo_vault(root: &Path) -> Result<()> {
             status: Some("open".into()),
             recurrence: None,
             recurrence_anchor: None,
+            projects: vec![],
         },
         TaskDraft {
             title: "Weekly review".into(),
@@ -164,6 +166,7 @@ fn seed_demo_vault(root: &Path) -> Result<()> {
             status: Some("open".into()),
             recurrence: Some("FREQ=WEEKLY".into()),
             recurrence_anchor: Some("scheduled".into()),
+            projects: vec![],
         },
         TaskDraft {
             title: "Write changelog".into(),
@@ -174,6 +177,7 @@ fn seed_demo_vault(root: &Path) -> Result<()> {
             status: Some("open".into()),
             recurrence: None,
             recurrence_anchor: None,
+            projects: vec![],
         },
         TaskDraft {
             title: "Cleanup archived notes".into(),
@@ -184,6 +188,7 @@ fn seed_demo_vault(root: &Path) -> Result<()> {
             status: Some("done".into()),
             recurrence: None,
             recurrence_anchor: None,
+            projects: vec![],
         },
     ];
 

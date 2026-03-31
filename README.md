@@ -41,13 +41,13 @@ Number keys `1`–`9` switch between configured view slots. The defaults:
 
 | Key | View | Shows |
 |-----|------|-------|
-| `1` | Inbox | Open tasks |
-| `2` | Today | Tasks for the focused date |
-| `3` | Doing | Tasks with status "doing" |
-| `4` | Overdue | Past-due tasks |
+| `1` | Open | Open tasks |
+| `2` | Date | Tasks for the focused date |
+| `3` | Overdue | Past-due tasks |
+| `4` | All | All non-archived tasks |
 | `5` | Tracked | Tasks with an active timer |
 | `6` | Archived | Archived tasks |
-| `7` | All | Everything |
+| `7` | Project | Tasks linked to the active project |
 
 ### Calendar
 
@@ -67,8 +67,9 @@ When the date view (`2`) is active, the task list shows tasks for the focused da
 | `z` | Archive / restore |
 | `T` | Start / stop time tracking |
 | `S` | Skip / unskip a recurring instance |
+| `P` | Toggle active project on selected task |
 | `n` | Create task (multi-step: title, dates, priority, status, recurrence) |
-| `c` | Quick create (title only, scheduled to focused date) |
+| `c` | Quick create (title only, scheduled to focused date, linked to active project if set) |
 | `e` | Edit title |
 | `i` | Open in `$EDITOR` |
 | `d` | Edit due date |
@@ -98,6 +99,16 @@ When editing due or scheduled dates, a date picker opens:
 
 `/` opens live search across tasks.
 
+### Active project
+
+`Shift-P` treats the selected task as the active project context. Running it again on the same task clears the active project.
+
+The active project is shown in the State pane. When an active project is set:
+
+- quick create links new tasks to that project via the `projects` field
+- the default Project view (`7`) shows tasks whose `projects` links resolve to the active project
+- switching views does not clear the active project
+
 ## Configuration
 
 ### Views
@@ -110,6 +121,14 @@ Views are configured in `tasknotes-tui.yaml` under the `views` key. Built-in vie
 
 Expression views have access to task fields (`status`, `priority`, `due`, `scheduled`, etc.) and special variables (`focusDate`, `today`, `isCompleted`, `isTracked`, `isArchived`, `path`).
 
+Project-aware expression helpers are also available:
+
+- `hasActiveProject`
+- `activeProjectPath`
+- `activeProjectTitle`
+- `isActiveProject`
+- `projectPaths` — resolved project targets for the current task
+
 ```yaml
 views:
   6:
@@ -117,9 +136,9 @@ views:
     kind: "expression"
     expression: 'status == "doing" && (scheduled == focusDate || due == focusDate)'
   7:
-    label: "Tracked Work"
+    label: "Project"
     kind: "expression"
-    where: "isTracked && !isCompleted"
+    where: "hasActiveProject && projectPaths.contains(activeProjectPath) && path != activeProjectPath"
 ```
 
 ### Keybinds
@@ -131,6 +150,7 @@ keybinds:
   ctrl-p: command_palette
   n: create_task
   c: quick_create_task
+  shift-p: set_active_project
   i: open_in_editor
   shift-t: toggle_time_tracking
   h: focus_prev_day

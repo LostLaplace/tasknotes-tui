@@ -11,8 +11,9 @@ use serde_json::Value;
 use crate::config::ArchiveConfig;
 use crate::date::{get_date_part, is_before_date_safe, today_local};
 use crate::field_mapping::{is_completed_status, FieldMapping};
-use crate::repository::{is_archived_task, TaskRecord};
+use crate::repository::{is_archived_task, resolve_task_project_paths, TaskRecord};
 use crate::tui_config::{ViewConfig, ViewFilter};
+use crate::app::ActiveProject;
 
 #[derive(Clone)]
 pub struct ViewEvalSupport {
@@ -86,13 +87,22 @@ impl CompiledViewFilter {
         mapping: &FieldMapping,
         archive: &ArchiveConfig,
         support: &ViewEvalSupport,
+        active_project: Option<&ActiveProject>,
     ) -> bool {
         match self {
             Self::BuiltIn(filter) => {
                 matches_builtin_filter(task, filter, mapping, archive, focus_date)
             }
             Self::Expression { expr, .. } => {
-                matches_expression_filter(task, expr, focus_date, mapping, archive, support)
+                matches_expression_filter(
+                    task,
+                    expr,
+                    focus_date,
+                    mapping,
+                    archive,
+                    support,
+                    active_project,
+                )
             }
             Self::InvalidExpression { .. } => false,
         }
@@ -157,8 +167,9 @@ fn matches_expression_filter(
     mapping: &FieldMapping,
     archive: &ArchiveConfig,
     support: &ViewEvalSupport,
+    active_project: Option<&ActiveProject>,
 ) -> bool {
-    let context = build_eval_context(task, focus_date, mapping, archive, support);
+    let context = build_eval_context(task, focus_date, mapping, archive, support, active_project);
     evaluate(expr, &context)
         .map(|value| is_truthy(&value))
         .unwrap_or(false)
@@ -170,6 +181,7 @@ fn build_eval_context(
     mapping: &FieldMapping,
     archive: &ArchiveConfig,
     support: &ViewEvalSupport,
+    active_project: Option<&ActiveProject>,
 ) -> EvalContext {
     let mut frontmatter = task.normalized_frontmatter.clone();
     frontmatter.insert("focusDate".into(), Value::String(focus_date.to_string()));
@@ -184,6 +196,35 @@ fn build_eval_context(
         Value::Bool(is_archived_task(task, archive)),
     );
     frontmatter.insert("path".into(), Value::String(task.path.clone()));
+    let project_paths = resolve_task_project_paths(task, &support.all_files);
+    frontmatter.insert(
+        "projectPaths".into(),
+        Value::Array(project_paths.into_iter().map(Value::String).collect()),
+    );
+    frontmatter.insert(
+        "hasActiveProject".into(),
+        Value::Bool(active_project.is_some()),
+    );
+    frontmatter.insert(
+        "activeProjectPath".into(),
+        active_project
+            .map(|project| Value::String(project.path.clone()))
+            .unwrap_or(Value::Null),
+    );
+    frontmatter.insert(
+        "activeProjectTitle".into(),
+        active_project
+            .map(|project| Value::String(project.title.clone()))
+            .unwrap_or(Value::Null),
+    );
+    frontmatter.insert(
+        "isActiveProject".into(),
+        Value::Bool(
+            active_project
+                .map(|project| project.path == task.path)
+                .unwrap_or(false),
+        ),
+    );
 
     EvalContext {
         frontmatter: Value::Object(frontmatter),
@@ -261,6 +302,7 @@ mod tests {
             &default_field_mapping(),
             &EffectiveConfig::default().archive,
             &ViewEvalSupport::empty(),
+            None,
         ));
     }
 
@@ -276,6 +318,7 @@ mod tests {
             &default_field_mapping(),
             &EffectiveConfig::default().archive,
             &ViewEvalSupport::empty(),
+            None,
         ));
     }
 
@@ -292,6 +335,7 @@ mod tests {
             &default_field_mapping(),
             &EffectiveConfig::default().archive,
             &ViewEvalSupport::empty(),
+            None,
         ));
     }
 }

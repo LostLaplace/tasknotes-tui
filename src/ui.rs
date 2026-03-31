@@ -19,7 +19,7 @@ use ratatui::{
 
 use crate::app::App;
 use crate::date::{get_date_part, today_local};
-use crate::repository::is_archived_task;
+use crate::repository::{is_archived_task, project_links};
 use crate::tui_config::KeyCommand;
 
 pub fn run(mut app: App) -> Result<()> {
@@ -116,6 +116,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             KeyCommand::EditStatus => app.begin_edit_status(),
             KeyCommand::EditRecurrence => app.begin_edit_recurrence(),
             KeyCommand::EditRecurrenceAnchor => app.begin_edit_recurrence_anchor(),
+            KeyCommand::SetActiveProject => app.set_selected_as_active_project()?,
         }
     }
     Ok(false)
@@ -146,7 +147,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         .split(layout[0]);
     let support_left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Length(6)])
+        .constraints([Constraint::Length(5), Constraint::Length(5)])
         .split(support[1]);
 
     let title = Paragraph::new(vec![
@@ -180,6 +181,17 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
             Span::styled(
                 format!("Selection {}", app.selected_position_label()),
                 Style::default().fg(Color::Blue),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Active project ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                app.active_project_title().unwrap_or("off"),
+                if app.active_project_title().is_some() {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
             ),
         ]),
         Line::from(vec![
@@ -304,6 +316,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         } else {
             "no"
         };
+        let project_list = project_links(task).join(", ");
         let mut lines = vec![
             Line::from(Span::styled(
                 task.title.as_str(),
@@ -322,6 +335,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         }
         if let Some(due) = task.due.as_deref().filter(|value| !value.is_empty()) {
             lines.push(detail_line("Due", &get_date_part(due)));
+        }
+        if !project_list.is_empty() {
+            lines.push(detail_line("Projects", &project_list));
+        }
+        if app
+            .active_project_path()
+            .is_some_and(|path| path == task.path.as_str())
+        {
+            lines.push(detail_line("Active project", "yes"));
         }
         lines.push(detail_line(
             "Tracking",
@@ -781,7 +803,9 @@ fn secondary_footer_line(app: &App) -> Line<'static> {
             Span::styled("Ctrl-P", Style::default().fg(Color::Yellow)),
             Span::raw(" for commands or "),
             Span::styled("/", Style::default().fg(Color::Yellow)),
-            Span::raw(" to search."),
+            Span::raw(" to search. "),
+            Span::styled("P", Style::default().fg(Color::Yellow)),
+            Span::raw(" sets the active project."),
         ])
     } else {
         Line::from(vec![

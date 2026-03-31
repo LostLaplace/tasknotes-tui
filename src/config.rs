@@ -67,6 +67,7 @@ impl Default for EffectiveConfig {
             ("priority".into(), "priority".into()),
             ("due".into(), "due".into()),
             ("scheduled".into(), "scheduled".into()),
+            ("projects".into(), "projects".into()),
             ("recurrence".into(), "recurrence".into()),
             ("recurrence_anchor".into(), "recurrenceAnchor".into()),
             ("complete_instances".into(), "completeInstances".into()),

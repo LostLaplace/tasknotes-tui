@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
+use mdbase::expressions::evaluator::ResolvedFileData;
 use mdbase::types::schema::TypeDef;
 use mdbase::Collection;
 use serde_json::{json, Map, Value};
@@ -49,6 +50,7 @@ pub struct TaskDraft {
     pub status: Option<String>,
     pub recurrence: Option<String>,
     pub recurrence_anchor: Option<String>,
+    pub projects: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -546,6 +548,23 @@ impl TaskRepository {
                 ),
             );
         }
+        if !draft.projects.is_empty() {
+            fields.insert(
+                self.config
+                    .mapping
+                    .get("projects")
+                    .cloned()
+                    .unwrap_or_else(|| "projects".into()),
+                Value::Array(
+                    draft
+                        .projects
+                        .iter()
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|value| Value::String(value.trim().to_string()))
+                        .collect(),
+                ),
+            );
+        }
         fields.insert(
             self.config
                 .mapping
@@ -606,6 +625,41 @@ impl TaskRepository {
             return Err(anyhow!("create failed: {}", error));
         }
         self.read_task(&path)
+    }
+
+    pub fn canonical_project_link_for_task(&self, task: &TaskRecord) -> anyhow::Result<String> {
+        let all_files = self.collection()?.build_all_files_data();
+        let basename = Path::new(&task.path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default()
+            .to_string();
+        anyhow::ensure!(
+            !basename.is_empty(),
+            "cannot derive canonical project link from empty basename"
+        );
+        let basename_matches = all_files
+            .iter()
+            .filter(|file| {
+                Path::new(&file.path)
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    == Some(basename.as_str())
+            })
+            .count();
+        if basename_matches <= 1 {
+            Ok(format!("[[{basename}]]"))
+        } else {
+            Ok(format!(
+                "[[{}]]",
+                task.path.strip_suffix(".md").unwrap_or(task.path.as_str())
+            ))
+        }
+    }
+
+    pub fn resolve_project_paths(&self, task: &TaskRecord) -> anyhow::Result<Vec<String>> {
+        let all_files = self.collection()?.build_all_files_data();
+        Ok(resolve_task_project_paths(task, &all_files))
     }
 
     pub fn update_title(&self, task: &TaskRecord, title: &str) -> anyhow::Result<TaskRecord> {
@@ -899,6 +953,159 @@ fn task_sort_key(a: &TaskRecord, b: &TaskRecord) -> Ordering {
         .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
 }
 
+pub fn resolve_task_project_paths(task: &TaskRecord, all_files: &[ResolvedFileData]) -> Vec<String> {
+    project_links(task)
+        .into_iter()
+        .filter_map(|link| resolve_link_value(&link, &task.path, all_files))
+        .fold(Vec::new(), |mut acc, path| {
+            if !acc.contains(&path) {
+                acc.push(path);
+            }
+            acc
+        })
+}
+
+pub fn project_links(task: &TaskRecord) -> Vec<String> {
+    task.normalized_frontmatter
+        .get("projects")
+        .map(read_link_values)
+        .unwrap_or_default()
+}
+
+fn read_link_values(value: &Value) -> Vec<String> {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        Value::String(value) => vec![value.to_string()],
+        _ => Vec::new(),
+    }
+}
+
+fn resolve_link_value(
+    raw: &str,
+    source_path: &str,
+    all_files: &[ResolvedFileData],
+) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let (target, format) = parse_link_target(raw)?;
+    if target.is_empty() {
+        return None;
+    }
+
+    if target.starts_with('/') {
+        return resolve_path_target(target.trim_start_matches('/'), all_files);
+    }
+
+    if matches!(format, LinkFormat::Markdown | LinkFormat::Path)
+        || target.starts_with("./")
+        || target.starts_with("../")
+    {
+        let source_dir = Path::new(source_path)
+            .parent()
+            .and_then(|path| path.to_str())
+            .unwrap_or("");
+        let joined = if source_dir.is_empty() {
+            target.to_string()
+        } else {
+            format!("{source_dir}/{target}")
+        };
+        return resolve_path_target(&normalize_path(&joined), all_files);
+    }
+
+    if target.contains('/') {
+        return resolve_path_target(target, all_files);
+    }
+
+    let mut id_matches = Vec::new();
+    let mut basename_matches = Vec::new();
+    for file in all_files {
+        if file
+            .frontmatter
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id == target)
+        {
+            id_matches.push(file.path.clone());
+        }
+        if Path::new(&file.path)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem == target)
+        {
+            basename_matches.push(file.path.clone());
+        }
+    }
+
+    match id_matches.len() {
+        1 => return id_matches.into_iter().next(),
+        n if n > 1 => return None,
+        _ => {}
+    }
+    match basename_matches.len() {
+        1 => basename_matches.into_iter().next(),
+        _ => None,
+    }
+}
+
+fn resolve_path_target(target: &str, all_files: &[ResolvedFileData]) -> Option<String> {
+    let target = normalize_path(target);
+    let candidates = [target.clone(), format!("{target}.md")];
+    for candidate in candidates {
+        if all_files.iter().any(|file| file.path == candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn normalize_path(path: &str) -> String {
+    let mut parts = Vec::new();
+    let normalized = path.replace('\\', "/");
+    for segment in normalized.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    parts.join("/")
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LinkFormat {
+    Wikilink,
+    Markdown,
+    Path,
+}
+
+fn parse_link_target(raw: &str) -> Option<(&str, LinkFormat)> {
+    if raw.starts_with("[[") && raw.ends_with("]]") {
+        let inner = &raw[2..raw.len() - 2];
+        let target = inner.split('|').next().unwrap_or(inner);
+        let target = target.split('#').next().unwrap_or(target).trim();
+        return Some((target, LinkFormat::Wikilink));
+    }
+    if raw.starts_with('[') && raw.ends_with(')') {
+        let pivot = raw.rfind("](")?;
+        let target = raw[pivot + 2..raw.len() - 1]
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .trim();
+        return Some((target, LinkFormat::Markdown));
+    }
+    Some((raw, LinkFormat::Path))
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -944,6 +1151,8 @@ fields:
     type: date
   scheduled:
     type: date
+  projects:
+    type: list
   recurrence:
     type: string
   recurrenceAnchor:
@@ -1003,6 +1212,7 @@ fields:
             status: Some("open".into()),
             recurrence: None,
             recurrence_anchor: None,
+            projects: vec![],
         })
         .unwrap();
 
@@ -1023,6 +1233,67 @@ fields:
         assert_eq!(refreshed.body.trim_end(), "original details");
         assert_eq!(refreshed.scheduled.as_deref(), Some("2026-04-02"));
         assert_eq!(refreshed.priority.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn project_links_resolve_from_wikilinks_and_markdown_links() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        let project = repo
+            .create_task_from_draft(&TaskDraft {
+                title: "Project Alpha".into(),
+                details: String::new(),
+                due: None,
+                scheduled: None,
+                priority: None,
+                status: Some("open".into()),
+                recurrence: None,
+                recurrence_anchor: None,
+                projects: vec![],
+            })
+            .unwrap();
+
+        let wikilink_task = repo
+            .create_task_from_draft(&TaskDraft {
+                title: "Child A".into(),
+                details: String::new(),
+                due: None,
+                scheduled: None,
+                priority: None,
+                status: Some("open".into()),
+                recurrence: None,
+                recurrence_anchor: None,
+                projects: vec!["[[Project Alpha]]".into()],
+            })
+            .unwrap();
+        let markdown_task = repo
+            .create_task_from_draft(&TaskDraft {
+                title: "Child B".into(),
+                details: String::new(),
+                due: None,
+                scheduled: None,
+                priority: None,
+                status: Some("open".into()),
+                recurrence: None,
+                recurrence_anchor: None,
+                projects: vec!["[Project](./Project Alpha.md)".into()],
+            })
+            .unwrap();
+
+        assert_eq!(
+            repo.resolve_project_paths(&wikilink_task).unwrap(),
+            vec![project.path.clone()]
+        );
+        assert_eq!(
+            repo.resolve_project_paths(&markdown_task).unwrap(),
+            vec![project.path.clone()]
+        );
+        assert_eq!(
+            repo.canonical_project_link_for_task(&project).unwrap(),
+            "[[Project Alpha]]"
+        );
     }
 
     #[test]
@@ -1173,6 +1444,7 @@ fields:
             status: Some("doing".into()),
             recurrence: Some("FREQ=WEEKLY".into()),
             recurrence_anchor: Some("completion".into()),
+            projects: vec![],
         })
         .unwrap();
 
@@ -1221,6 +1493,7 @@ fields:
             status: Some("open".into()),
             recurrence: None,
             recurrence_anchor: None,
+            projects: vec![],
         })
         .unwrap();
         repo.create_task_from_draft(&TaskDraft {
@@ -1232,6 +1505,7 @@ fields:
             status: Some("open".into()),
             recurrence: None,
             recurrence_anchor: None,
+            projects: vec![],
         })
         .unwrap();
 

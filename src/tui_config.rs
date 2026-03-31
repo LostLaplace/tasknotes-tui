@@ -61,6 +61,7 @@ pub enum KeyCommand {
     EditStatus,
     EditRecurrence,
     EditRecurrenceAnchor,
+    SetActiveProject,
     FocusPrevDay,
     FocusNextDay,
     FocusPrevWeek,
@@ -148,6 +149,15 @@ pub fn default_views() -> BTreeMap<u8, ViewConfig> {
                 filter: ViewFilter::Archived,
             },
         ),
+        (
+            7,
+            ViewConfig {
+                label: "Project".into(),
+                filter: ViewFilter::Expression {
+                    value: "hasActiveProject && projectPaths.contains(activeProjectPath) && path != activeProjectPath".into(),
+                },
+            },
+        ),
     ])
 }
 
@@ -176,6 +186,7 @@ pub fn default_keybinds() -> BTreeMap<String, KeyCommand> {
         ("t".into(), KeyCommand::EditStatus),
         ("shift-r".into(), KeyCommand::EditRecurrence),
         ("shift-a".into(), KeyCommand::EditRecurrenceAnchor),
+        ("shift-p".into(), KeyCommand::SetActiveProject),
         ("h".into(), KeyCommand::FocusPrevDay),
         ("left".into(), KeyCommand::FocusPrevDay),
         ("l".into(), KeyCommand::FocusNextDay),

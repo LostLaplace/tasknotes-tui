@@ -18,3 +18,7 @@ views:
   6:
     label: "All"
     kind: "all"
+  7:
+    label: "Project"
+    kind: "expression"
+    expression: "hasActiveProject && projectPaths.contains(activeProjectPath) && path != activeProjectPath"

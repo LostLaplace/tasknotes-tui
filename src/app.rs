@@ -34,6 +34,12 @@ pub enum InputMode {
     EditRecurrenceAnchor,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveProject {
+    pub path: String,
+    pub title: String,
+}
+
 pub struct App {
     pub repo: TaskRepository,
     pub tui_config: TuiConfig,
@@ -54,6 +60,7 @@ pub struct App {
     pub picker_date: String,
     pub picker_has_value: bool,
     pub pending_open_editor: bool,
+    pub active_project: Option<ActiveProject>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +83,8 @@ pub enum PaletteCommand {
     EditStatus,
     EditRecurrence,
     EditRecurrenceAnchor,
+    SetActiveProject,
+    ClearActiveProject,
 }
 
 pub struct PaletteItem {
@@ -100,6 +109,20 @@ fn static_palette_items() -> Vec<PaletteItem> {
             title: "Quick create".into(),
             aliases: vec!["quick".into(), "capture".into(), "c".into()],
             description: "Create a task for the focused date from a title only".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::SetActiveProject,
+            title: "Set active project".into(),
+            aliases: vec!["project".into(), "activate project".into(), "shift-p".into()],
+            description: "Treat the selected task as the active project context".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::ClearActiveProject,
+            title: "Clear active project".into(),
+            aliases: vec!["clear project".into(), "unset project".into()],
+            description: "Clear the current active project context".into(),
             hotkey: None,
         },
         PaletteItem {
@@ -233,6 +256,7 @@ impl App {
             picker_date: today_local(),
             picker_has_value: true,
             pending_open_editor: false,
+            active_project: None,
         };
         app.reload_from_disk()?;
         Ok(app)
@@ -318,12 +342,6 @@ impl App {
     pub fn activate_view_slot(&mut self, slot: u8) -> Result<()> {
         if self.tui_config.views.contains_key(&slot) {
             self.current_view_slot = slot;
-            if matches!(
-                self.current_view().map(|view| &view.filter),
-                Some(ViewFilter::Date)
-            ) {
-                self.focus_date = today_local();
-            }
             self.refresh()?;
             if let Some(error) = self.current_view_error() {
                 self.status = format!("View {} invalid: {}", slot, error);
@@ -415,6 +433,16 @@ impl App {
 
     fn replace_cached_task(&mut self, old_path: &str, updated: TaskRecord) {
         let updated_path = updated.path.clone();
+        if self
+            .active_project
+            .as_ref()
+            .is_some_and(|project| project.path == old_path)
+        {
+            self.active_project = Some(ActiveProject {
+                path: updated.path.clone(),
+                title: updated.title.clone(),
+            });
+        }
         if let Some(existing) = self.all_tasks.iter_mut().find(|task| task.path == old_path) {
             *existing = updated;
         } else {
@@ -438,6 +466,13 @@ impl App {
     }
 
     fn remove_cached_task(&mut self, path: &str) {
+        if self
+            .active_project
+            .as_ref()
+            .is_some_and(|project| project.path == path)
+        {
+            self.active_project = None;
+        }
         self.all_tasks.retain(|task| task.path != path);
         self.calendar_tasks = self.all_tasks.clone();
         self.apply_filters();
@@ -473,7 +508,44 @@ impl App {
     pub fn begin_quick_create(&mut self) {
         self.input_mode = InputMode::QuickCreateTitle;
         self.input_value.clear();
-        self.status = format!("Quick create for {}: enter title", self.focus_date);
+        self.status = if let Some(project) = self.active_project.as_ref() {
+            format!(
+                "Quick create for {} in project {}: enter title",
+                self.focus_date, project.title
+            )
+        } else {
+            format!("Quick create for {}: enter title", self.focus_date)
+        };
+    }
+
+    pub fn set_selected_as_active_project(&mut self) -> Result<()> {
+        let Some(task) = self.selected_task().cloned() else {
+            self.status = "No task selected".to_string();
+            return Ok(());
+        };
+        if self
+            .active_project
+            .as_ref()
+            .is_some_and(|project| project.path == task.path)
+        {
+            self.active_project = None;
+            self.status = format!("Cleared active project {}", task.title);
+            self.apply_filters();
+            return Ok(());
+        }
+        self.active_project = Some(ActiveProject {
+            path: task.path.clone(),
+            title: task.title.clone(),
+        });
+        self.status = format!("Active project set to {}", task.title);
+        self.apply_filters();
+        Ok(())
+    }
+
+    pub fn clear_active_project(&mut self) {
+        self.active_project = None;
+        self.status = "Cleared active project".to_string();
+        self.apply_filters();
     }
 
     pub fn begin_edit_title(&mut self) {
@@ -709,6 +781,7 @@ impl App {
                         status: None,
                         recurrence: None,
                         recurrence_anchor: None,
+                        projects: self.active_project_links()?,
                     })?;
                     self.input_mode = InputMode::None;
                     self.input_value.clear();
@@ -756,6 +829,7 @@ impl App {
                     self.status =
                         "New task: recurrence anchor (scheduled or completion)".to_string();
                 } else {
+                    self.draft.projects = self.active_project_links()?;
                     let title = self.draft.title.clone();
                     let created = self.repo.create_task_from_draft(&self.draft)?;
                     self.input_mode = InputMode::None;
@@ -766,6 +840,7 @@ impl App {
             }
             InputMode::CreateRecurrenceAnchor => {
                 self.draft.recurrence_anchor = option_from_input(&self.input_value);
+                self.draft.projects = self.active_project_links()?;
                 let title = self.draft.title.clone();
                 let created = self.repo.create_task_from_draft(&self.draft)?;
                 self.input_mode = InputMode::None;
@@ -935,6 +1010,27 @@ impl App {
         }
     }
 
+    pub fn active_project_title(&self) -> Option<&str> {
+        self.active_project.as_ref().map(|project| project.title.as_str())
+    }
+
+    pub fn active_project_path(&self) -> Option<&str> {
+        self.active_project.as_ref().map(|project| project.path.as_str())
+    }
+
+    pub fn active_project_links(&self) -> Result<Vec<String>> {
+        self.active_project
+            .as_ref()
+            .map(|project| {
+                self.repo
+                    .read_task(&project.path)
+                    .and_then(|task| self.repo.canonical_project_link_for_task(&task))
+                    .map(|link| vec![link])
+            })
+            .transpose()
+            .map(|links| links.unwrap_or_default())
+    }
+
     pub fn contextual_shortcuts(&self) -> Vec<(String, String)> {
         match self.input_mode {
             InputMode::None => vec![
@@ -950,9 +1046,10 @@ impl App {
                 (
                     "Actions".to_string(),
                     format!(
-                        "{} complete, {} archive, {} palette",
+                        "{} complete, {} archive, {} project, {} palette",
                         self.binding_label(KeyCommand::ToggleComplete, "x"),
                         self.binding_label(KeyCommand::ToggleArchive, "z"),
+                        self.binding_label(KeyCommand::SetActiveProject, "P"),
                         self.binding_label(KeyCommand::CommandPalette, "ctrl-p"),
                     ),
                 ),
@@ -1102,6 +1199,8 @@ impl App {
             PaletteCommand::EditStatus => self.begin_edit_status(),
             PaletteCommand::EditRecurrence => self.begin_edit_recurrence(),
             PaletteCommand::EditRecurrenceAnchor => self.begin_edit_recurrence_anchor(),
+            PaletteCommand::SetActiveProject => self.set_selected_as_active_project()?,
+            PaletteCommand::ClearActiveProject => self.clear_active_project(),
         }
         Ok(())
     }
@@ -1121,6 +1220,7 @@ impl App {
             &self.repo.field_mapping,
             &self.repo.config.archive,
             support,
+            self.active_project.as_ref(),
         )
     }
 
@@ -1212,6 +1312,8 @@ impl App {
             PaletteCommand::EditStatus => KeyCommand::EditStatus,
             PaletteCommand::EditRecurrence => KeyCommand::EditRecurrence,
             PaletteCommand::EditRecurrenceAnchor => KeyCommand::EditRecurrenceAnchor,
+            PaletteCommand::SetActiveProject => KeyCommand::SetActiveProject,
+            PaletteCommand::ClearActiveProject => return None,
         };
         let bindings = self.tui_config.bindings_for_command(key_command);
         (!bindings.is_empty()).then(|| bindings.join(", "))
@@ -1294,4 +1396,159 @@ fn fuzzy_match(haystack: &str, needle: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    fn write_collection(root: &Path) {
+        fs::write(
+            root.join("mdbase.yaml"),
+            r#"spec_version: "0.2.1"
+settings:
+  types_folder: "_types"
+  default_validation: "warn"
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("_types")).unwrap();
+        fs::write(
+            root.join("tasknotes.yaml"),
+            r#"task_detection:
+  method: property
+  property_name: status
+  property_value: ""
+"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("_types/task.md"),
+            r#"---
+name: task
+path_pattern: "TaskNotes/Tasks/{title}.md"
+fields:
+  title:
+    type: string
+    required: true
+  status:
+    type: string
+  priority:
+    type: string
+  scheduled:
+    type: date
+  projects:
+    type: list
+  dateCreated:
+    type: datetime
+  dateModified:
+    type: datetime
+---
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("TaskNotes/Tasks")).unwrap();
+    }
+
+    #[test]
+    fn active_project_drives_project_view_and_quick_create() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        let project = repo
+            .create_task_from_draft(&TaskDraft {
+                title: "Plan release".into(),
+                details: "Project container".into(),
+                due: None,
+                scheduled: Some("2026-03-29".into()),
+                priority: Some("high".into()),
+                status: Some("doing".into()),
+                recurrence: None,
+                recurrence_anchor: None,
+                projects: vec![],
+            })
+            .unwrap();
+        repo.create_task_from_draft(&TaskDraft {
+            title: "Write changelog".into(),
+            details: String::new(),
+            due: None,
+            scheduled: Some("2026-03-30".into()),
+            priority: None,
+            status: Some("open".into()),
+            recurrence: None,
+            recurrence_anchor: None,
+            projects: vec!["[[Plan release]]".into()],
+        })
+        .unwrap();
+
+        let mut app = App::new(repo, TuiConfig::default()).unwrap();
+        app.selected = app
+            .tasks
+            .iter()
+            .position(|task| task.path == project.path)
+            .unwrap();
+        app.set_selected_as_active_project().unwrap();
+        assert_eq!(app.active_project_title(), Some("Plan release"));
+
+        app.activate_view_slot(7).unwrap();
+        assert_eq!(app.tasks.len(), 1);
+        assert_eq!(app.tasks[0].title, "Write changelog");
+
+        app.begin_quick_create();
+        app.input_value = "Ship release".into();
+        app.submit_input().unwrap();
+
+        assert_eq!(app.current_view_slot, 7);
+        assert_eq!(app.tasks.len(), 2);
+        assert!(app.tasks.iter().any(|task| task.title == "Ship release"));
+        let created = app
+            .all_tasks
+            .iter()
+            .find(|task| task.title == "Ship release")
+            .unwrap();
+        assert_eq!(
+            created.normalized_frontmatter.get("projects"),
+            Some(&serde_json::json!(["[[Plan release]]"]))
+        );
+    }
+
+    #[test]
+    fn setting_active_project_on_same_task_toggles_it_off() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        let project = repo
+            .create_task_from_draft(&TaskDraft {
+                title: "Plan release".into(),
+                details: String::new(),
+                due: None,
+                scheduled: Some("2026-03-29".into()),
+                priority: None,
+                status: Some("open".into()),
+                recurrence: None,
+                recurrence_anchor: None,
+                projects: vec![],
+            })
+            .unwrap();
+
+        let mut app = App::new(repo, TuiConfig::default()).unwrap();
+        app.selected = app
+            .tasks
+            .iter()
+            .position(|task| task.path == project.path)
+            .unwrap();
+
+        app.set_selected_as_active_project().unwrap();
+        assert_eq!(app.active_project_title(), Some("Plan release"));
+
+        app.set_selected_as_active_project().unwrap();
+        assert_eq!(app.active_project_title(), None);
+    }
 }
