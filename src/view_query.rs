@@ -8,12 +8,12 @@ use mdbase::types::schema::TypeDef;
 use mdbase::Collection;
 use serde_json::Value;
 
+use crate::app::ActiveProject;
 use crate::config::ArchiveConfig;
 use crate::date::{get_date_part, is_before_date_safe, today_local};
 use crate::field_mapping::{is_completed_status, FieldMapping};
 use crate::repository::{is_archived_task, resolve_task_project_paths, TaskRecord};
 use crate::tui_config::{ViewConfig, ViewFilter};
-use crate::app::ActiveProject;
 
 #[derive(Clone)]
 pub struct ViewEvalSupport {
@@ -93,17 +93,15 @@ impl CompiledViewFilter {
             Self::BuiltIn(filter) => {
                 matches_builtin_filter(task, filter, mapping, archive, focus_date)
             }
-            Self::Expression { expr, .. } => {
-                matches_expression_filter(
-                    task,
-                    expr,
-                    focus_date,
-                    mapping,
-                    archive,
-                    support,
-                    active_project,
-                )
-            }
+            Self::Expression { expr, .. } => matches_expression_filter(
+                task,
+                expr,
+                focus_date,
+                mapping,
+                archive,
+                support,
+                active_project,
+            ),
             Self::InvalidExpression { .. } => false,
         }
     }

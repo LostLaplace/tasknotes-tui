@@ -90,11 +90,10 @@ pub struct BridgeRequest {
 }
 
 pub fn execute(operation: &str, input: &Value) -> Value {
-    let reply = match execute_inner(operation, input) {
+    match execute_inner(operation, input) {
         Ok(result) => json!({ "ok": true, "result": result }),
         Err(error) => json!({ "ok": false, "error": error.to_string() }),
-    };
-    reply
+    }
 }
 
 fn execute_inner(operation: &str, input: &Value) -> Result<Value> {
@@ -1125,33 +1124,24 @@ mod tests {
     #[test]
     fn archive_apply_claimed_and_sets_archive_markers() {
         let claim = execute("meta.claim", &json!({}));
-        assert_eq!(
-            claim["result"]["capabilities"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .any(|cap| cap == "archive"),
-            true
-        );
-        assert_eq!(
-            claim["result"]["capabilities"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .any(|cap| cap == "dependencies" || cap == "reminders" || cap == "links"),
-            false
-        );
-        assert_eq!(
-            claim["result"]["profiles"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .any(|profile| profile == "extended"),
-            false
-        );
+        assert!(claim["result"]["capabilities"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .any(|cap| cap == "archive"));
+        assert!(!claim["result"]["capabilities"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .any(|cap| cap == "dependencies" || cap == "reminders" || cap == "links"));
+        assert!(!claim["result"]["profiles"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .any(|profile| profile == "extended"));
 
         let result = execute(
             "archive.apply",
@@ -1182,15 +1172,12 @@ mod tests {
     #[test]
     fn rename_ops_are_claimed_and_follow_title_storage_rules() {
         let claim = execute("meta.claim", &json!({}));
-        assert_eq!(
-            claim["result"]["capabilities"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .any(|cap| cap == "rename"),
-            true
-        );
+        assert!(claim["result"]["capabilities"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .any(|cap| cap == "rename"));
 
         let explicit = execute(
             "rename.apply",

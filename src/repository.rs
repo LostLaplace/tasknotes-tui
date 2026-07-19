@@ -953,7 +953,10 @@ fn task_sort_key(a: &TaskRecord, b: &TaskRecord) -> Ordering {
         .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
 }
 
-pub fn resolve_task_project_paths(task: &TaskRecord, all_files: &[ResolvedFileData]) -> Vec<String> {
+pub fn resolve_task_project_paths(
+    task: &TaskRecord,
+    all_files: &[ResolvedFileData],
+) -> Vec<String> {
     project_links(task)
         .into_iter()
         .filter_map(|link| resolve_link_value(&link, &task.path, all_files))
@@ -1057,12 +1060,9 @@ fn resolve_link_value(
 fn resolve_path_target(target: &str, all_files: &[ResolvedFileData]) -> Option<String> {
     let target = normalize_path(target);
     let candidates = [target.clone(), format!("{target}.md")];
-    for candidate in candidates {
-        if all_files.iter().any(|file| file.path == candidate) {
-            return Some(candidate);
-        }
-    }
-    None
+    candidates
+        .into_iter()
+        .find(|candidate| all_files.iter().any(|file| file.path == *candidate))
 }
 
 fn normalize_path(path: &str) -> String {

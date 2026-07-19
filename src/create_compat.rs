@@ -191,7 +191,7 @@ fn derive_path_from_type(
         rendered = rendered.replace(&format!("{{{{{key}}}}}"), value);
         rendered = rendered.replace(&format!("{{{key}}}"), value);
     }
-    rendered = rendered.replace('{', "").replace('}', "");
+    rendered = rendered.replace(['{', '}'], "");
     let normalized =
         normalize_relative_path(&rendered).ok_or_else(|| anyhow::anyhow!("path_required"))?;
     Ok(ensure_markdown_ext(&normalized))

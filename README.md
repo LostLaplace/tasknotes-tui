@@ -1,6 +1,8 @@
 # tasknotes-tui
 
-A terminal interface for managing markdown-based tasks. Built in Rust on top of [mdbase-rs](https://github.com/anthropics/mdbase-rs), compliant with the [TaskNotes spec](https://github.com/anthropics/tasknotes-spec).
+A terminal interface for managing Markdown-based tasks. Built in Rust on top of
+[mdbase-rs](https://github.com/callumalpass/mdbase-rs) and compatible with
+TaskNotes collections.
 
 Tasks live as markdown files with YAML frontmatter in your vault. The TUI reads and writes them directly — no database, no sync service.
 
@@ -16,7 +18,9 @@ Prebuilt binaries for Linux x86_64, macOS (Intel and Apple Silicon), and Windows
 
 ## Setup
 
-Your vault needs an `mdbase.yaml` and a task type definition. If you already have a TaskNotes-compatible vault, point the TUI at it:
+Your vault needs an `mdbase.yaml` and a task type definition. The TUI runs
+against mdbase-rs v0.3 and continues to read v0.2 collections, so existing
+TaskNotes vaults do not need an in-place rewrite just to use it:
 
 ```bash
 tasknotes-tui --root /path/to/vault

@@ -213,12 +213,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     .block(Block::default().title("State").borders(Borders::ALL));
     frame.render_widget(title, support_left[0]);
 
-    let help = Paragraph::new(vec![
-        Line::from(shortcut_line(app)),
-        Line::from(secondary_footer_line(app)),
-    ])
-    .block(Block::default().title("Help").borders(Borders::ALL))
-    .wrap(Wrap { trim: false });
+    let help = Paragraph::new(vec![shortcut_line(app), secondary_footer_line(app)])
+        .block(Block::default().title("Help").borders(Borders::ALL))
+        .wrap(Wrap { trim: false });
     frame.render_widget(help, support_left[1]);
 
     frame.render_widget(

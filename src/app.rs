@@ -114,7 +114,11 @@ fn static_palette_items() -> Vec<PaletteItem> {
         PaletteItem {
             command: PaletteCommand::SetActiveProject,
             title: "Set active project".into(),
-            aliases: vec!["project".into(), "activate project".into(), "shift-p".into()],
+            aliases: vec![
+                "project".into(),
+                "activate project".into(),
+                "shift-p".into(),
+            ],
             description: "Treat the selected task as the active project context".into(),
             hotkey: None,
         },
@@ -1011,11 +1015,15 @@ impl App {
     }
 
     pub fn active_project_title(&self) -> Option<&str> {
-        self.active_project.as_ref().map(|project| project.title.as_str())
+        self.active_project
+            .as_ref()
+            .map(|project| project.title.as_str())
     }
 
     pub fn active_project_path(&self) -> Option<&str> {
-        self.active_project.as_ref().map(|project| project.path.as_str())
+        self.active_project
+            .as_ref()
+            .map(|project| project.path.as_str())
     }
 
     pub fn active_project_links(&self) -> Result<Vec<String>> {

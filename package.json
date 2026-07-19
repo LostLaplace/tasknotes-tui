@@ -7,8 +7,12 @@
     "build": "cargo build",
     "docs:seed-demo-vault": "cargo run --bin tasknotes-tui -- --root docs/demo-vault seed-demo-vault",
     "docs:snapshot": "npm run docs:seed-demo-vault && cargo run --bin tasknotes-tui -- --root docs/demo-vault --focus-date 2026-03-29 render-snapshot --width 120 --height 32 > docs/vhs/output/overview.txt",
+    "docs:screenshotty:overview": "bash docs/screenshotty/record-overview.sh",
+    "docs:screenshotty:workflow": "bash docs/screenshotty/record-workflow.sh",
+    "docs:screenshotty:all": "npm run docs:screenshotty:overview && npm run docs:screenshotty:workflow",
     "docs:vhs:overview": "npm run docs:seed-demo-vault && vhs docs/vhs/overview.tape",
     "docs:vhs:workflow": "npm run docs:seed-demo-vault && vhs docs/vhs/workflow.tape",
+    "docs:vhs:showcase": "npm run docs:seed-demo-vault && vhs docs/vhs/showcase.tape",
     "conformance:test": "cargo build && TASKNOTES_ADAPTER=../tasknotes-tui/js/tasknotes-spec-adapter.mjs npm --prefix ../tasknotes-spec run conformance:test",
     "conformance:test:rust": "cargo build && TASKNOTES_TUI_BRIDGE_MODE=rust TASKNOTES_ADAPTER=../tasknotes-tui/js/tasknotes-spec-adapter.mjs npm --prefix ../tasknotes-spec run conformance:test",
     "conformance:test:reference": "npm --prefix ../tasknotes-spec run conformance:test:mdbase-tasknotes"
