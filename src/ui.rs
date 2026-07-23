@@ -114,6 +114,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             KeyCommand::ToggleTimeTracking => app.toggle_selected_time_tracking()?,
             KeyCommand::EditPriority => app.begin_edit_priority(),
             KeyCommand::EditStatus => app.begin_edit_status(),
+            KeyCommand::SetStatus(value) => app.set_selected_status(&value)?,
             KeyCommand::EditRecurrence => app.begin_edit_recurrence(),
             KeyCommand::EditRecurrenceAnchor => app.begin_edit_recurrence_anchor(),
             KeyCommand::SetActiveProject => app.set_selected_as_active_project()?,

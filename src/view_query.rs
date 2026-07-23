@@ -239,6 +239,7 @@ fn build_eval_context(
         type_names: support.type_names_by_path.get(&task.path).cloned(),
         types: Some(support.types.clone()),
         string_concat: false,
+        note_namespace_source: Default::default(),
     }
 }
 

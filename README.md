@@ -161,6 +161,16 @@ keybinds:
   l: focus_next_day
 ```
 
+`edit_status` (default `t`) opens a free-text prompt. To jump straight to a fixed status value without typing, bind a key to `set_status:<value>`:
+
+```yaml
+keybinds:
+  b: "set_status:next_action"
+  u: "set_status:inbox"
+```
+
+Note: digits `1`-`9` are reserved for view slot switching and can't be rebound.
+
 ### Archive
 
 Archive behavior is configured in `tasknotes.yaml`:

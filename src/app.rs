@@ -592,6 +592,24 @@ impl App {
         }
     }
 
+    /// Sets the selected task's status to `value` directly, without opening the
+    /// free-text edit prompt. Used by `KeyCommand::SetStatus` bindings.
+    pub fn set_selected_status(&mut self, value: &str) -> Result<()> {
+        if let Some(task) = self.selected_task().cloned() {
+            let value = option_from_input(value);
+            let updated = self
+                .repo
+                .update_scalar_field(&task, "status", value.as_deref())?;
+            self.replace_cached_task(&task.path, updated);
+            self.status = format!(
+                "Set status to {} for {}",
+                value.as_deref().unwrap_or("(none)"),
+                task.title
+            );
+        }
+        Ok(())
+    }
+
     pub fn begin_edit_recurrence(&mut self) {
         if let Some(task) = self.selected_task().cloned() {
             self.input_mode = InputMode::EditRecurrence;
@@ -1411,6 +1429,7 @@ mod tests {
     use std::fs;
     use std::path::Path;
 
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tempfile::tempdir;
 
     use super::*;
@@ -1558,5 +1577,56 @@ fields:
 
         app.set_selected_as_active_project().unwrap();
         assert_eq!(app.active_project_title(), None);
+    }
+
+    #[test]
+    fn set_selected_status_updates_status_without_free_text_prompt() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        let task = repo
+            .create_task_from_draft(&TaskDraft {
+                title: "Triage inbox item".into(),
+                details: String::new(),
+                due: None,
+                scheduled: None,
+                priority: None,
+                status: Some("inbox".into()),
+                recurrence: None,
+                recurrence_anchor: None,
+                projects: vec![],
+            })
+            .unwrap();
+
+        let mut config = TuiConfig::default();
+        config
+            .keybinds
+            .insert("b".into(), KeyCommand::SetStatus("next_action".into()));
+
+        let mut app = App::new(repo, config).unwrap();
+        app.selected = app
+            .tasks
+            .iter()
+            .position(|t| t.path == task.path)
+            .unwrap();
+
+        // Simulate the configured keybind resolving to a `SetStatus` command, then
+        // dispatching it the same way `ui.rs` would.
+        let key = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE);
+        let command = app.tui_config.command_for_key(key);
+        assert_eq!(command, Some(KeyCommand::SetStatus("next_action".into())));
+
+        // No input_mode prompt should be involved: status flips immediately.
+        assert_eq!(app.input_mode, InputMode::None);
+        app.set_selected_status("next_action").unwrap();
+        assert_eq!(app.input_mode, InputMode::None);
+
+        let updated = app
+            .all_tasks
+            .iter()
+            .find(|t| t.path == task.path)
+            .unwrap();
+        assert_eq!(updated.status, "next_action");
     }
 }

@@ -38,8 +38,7 @@ pub enum ViewFilter {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum KeyCommand {
     CommandPalette,
     Quit,
@@ -59,6 +58,10 @@ pub enum KeyCommand {
     EditScheduled,
     EditPriority,
     EditStatus,
+    /// Sets the selected task's status directly to a fixed value, bypassing the
+    /// free-text prompt used by `EditStatus`. Configured in `tasknotes-tui.yaml` as a
+    /// string of the form `set_status:<value>`, e.g. `keybinds: { "1": "set_status:inbox" }`.
+    SetStatus(String),
     EditRecurrence,
     EditRecurrenceAnchor,
     SetActiveProject,
@@ -67,6 +70,98 @@ pub enum KeyCommand {
     FocusPrevWeek,
     FocusNextWeek,
     FocusToday,
+}
+
+impl KeyCommand {
+    /// Parses the config string form of a key command. Unit commands use their
+    /// snake_case name (e.g. `edit_status`); `SetStatus` uses `set_status:<value>`.
+    fn from_config_str(value: &str) -> Option<Self> {
+        if let Some(status_value) = value.strip_prefix("set_status:") {
+            return Some(KeyCommand::SetStatus(status_value.to_string()));
+        }
+        Some(match value {
+            "command_palette" => KeyCommand::CommandPalette,
+            "quit" => KeyCommand::Quit,
+            "next_task" => KeyCommand::NextTask,
+            "prev_task" => KeyCommand::PrevTask,
+            "refresh" => KeyCommand::Refresh,
+            "search" => KeyCommand::Search,
+            "create_task" => KeyCommand::CreateTask,
+            "quick_create_task" => KeyCommand::QuickCreateTask,
+            "toggle_complete" => KeyCommand::ToggleComplete,
+            "toggle_time_tracking" => KeyCommand::ToggleTimeTracking,
+            "toggle_skip_recurring" => KeyCommand::ToggleSkipRecurring,
+            "toggle_archive" => KeyCommand::ToggleArchive,
+            "edit_title" => KeyCommand::EditTitle,
+            "open_in_editor" => KeyCommand::OpenInEditor,
+            "edit_due" => KeyCommand::EditDue,
+            "edit_scheduled" => KeyCommand::EditScheduled,
+            "edit_priority" => KeyCommand::EditPriority,
+            "edit_status" => KeyCommand::EditStatus,
+            "edit_recurrence" => KeyCommand::EditRecurrence,
+            "edit_recurrence_anchor" => KeyCommand::EditRecurrenceAnchor,
+            "set_active_project" => KeyCommand::SetActiveProject,
+            "focus_prev_day" => KeyCommand::FocusPrevDay,
+            "focus_next_day" => KeyCommand::FocusNextDay,
+            "focus_prev_week" => KeyCommand::FocusPrevWeek,
+            "focus_next_week" => KeyCommand::FocusNextWeek,
+            "focus_today" => KeyCommand::FocusToday,
+            _ => return None,
+        })
+    }
+
+    /// Renders the config string form of this command (inverse of `from_config_str`).
+    fn to_config_string(&self) -> String {
+        match self {
+            KeyCommand::SetStatus(value) => format!("set_status:{value}"),
+            KeyCommand::CommandPalette => "command_palette".to_string(),
+            KeyCommand::Quit => "quit".to_string(),
+            KeyCommand::NextTask => "next_task".to_string(),
+            KeyCommand::PrevTask => "prev_task".to_string(),
+            KeyCommand::Refresh => "refresh".to_string(),
+            KeyCommand::Search => "search".to_string(),
+            KeyCommand::CreateTask => "create_task".to_string(),
+            KeyCommand::QuickCreateTask => "quick_create_task".to_string(),
+            KeyCommand::ToggleComplete => "toggle_complete".to_string(),
+            KeyCommand::ToggleTimeTracking => "toggle_time_tracking".to_string(),
+            KeyCommand::ToggleSkipRecurring => "toggle_skip_recurring".to_string(),
+            KeyCommand::ToggleArchive => "toggle_archive".to_string(),
+            KeyCommand::EditTitle => "edit_title".to_string(),
+            KeyCommand::OpenInEditor => "open_in_editor".to_string(),
+            KeyCommand::EditDue => "edit_due".to_string(),
+            KeyCommand::EditScheduled => "edit_scheduled".to_string(),
+            KeyCommand::EditPriority => "edit_priority".to_string(),
+            KeyCommand::EditStatus => "edit_status".to_string(),
+            KeyCommand::EditRecurrence => "edit_recurrence".to_string(),
+            KeyCommand::EditRecurrenceAnchor => "edit_recurrence_anchor".to_string(),
+            KeyCommand::SetActiveProject => "set_active_project".to_string(),
+            KeyCommand::FocusPrevDay => "focus_prev_day".to_string(),
+            KeyCommand::FocusNextDay => "focus_next_day".to_string(),
+            KeyCommand::FocusPrevWeek => "focus_prev_week".to_string(),
+            KeyCommand::FocusNextWeek => "focus_next_week".to_string(),
+            KeyCommand::FocusToday => "focus_today".to_string(),
+        }
+    }
+}
+
+impl Serialize for KeyCommand {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_config_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for KeyCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        KeyCommand::from_config_str(&raw)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown key command: {raw}")))
+    }
 }
 
 impl Default for TuiConfig {
@@ -81,7 +176,7 @@ impl Default for TuiConfig {
 impl TuiConfig {
     pub fn command_for_key(&self, key: KeyEvent) -> Option<KeyCommand> {
         let normalized = normalize_key_event(key)?;
-        self.keybinds.get(&normalized).copied()
+        self.keybinds.get(&normalized).cloned()
     }
 
     pub fn bindings_for_command(&self, command: KeyCommand) -> Vec<String> {
@@ -282,5 +377,32 @@ views:
         );
         assert_eq!(config.views.get(&1).unwrap().label, "Open");
         assert!(config.views.contains_key(&6));
+    }
+
+    #[test]
+    fn deserialize_set_status_keybind() {
+        let config: TuiConfig = serde_yaml::from_str(
+            r#"
+keybinds:
+  "1": "set_status:inbox"
+  "2": "set_status:next_action"
+  t: edit_status
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.keybinds.get("1"),
+            Some(&KeyCommand::SetStatus("inbox".to_string()))
+        );
+        assert_eq!(
+            config.keybinds.get("2"),
+            Some(&KeyCommand::SetStatus("next_action".to_string()))
+        );
+        assert_eq!(config.keybinds.get("t"), Some(&KeyCommand::EditStatus));
+        assert_eq!(
+            config.bindings_for_command(KeyCommand::SetStatus("next_action".to_string())),
+            vec!["2".to_string()]
+        );
     }
 }
