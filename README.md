@@ -145,6 +145,48 @@ views:
     where: "hasActiveProject && projectPaths.contains(activeProjectPath) && path != activeProjectPath"
 ```
 
+### Sorting & urgency
+
+Every view sorts by `scheduled ?? due` date by default (`sort: date`, the default). A view can
+opt into Taskwarrior-style **urgency sorting** instead:
+
+```yaml
+views:
+  1:
+    label: "Open"
+    kind: "open"
+    sort: "urgency"
+```
+
+Urgency is a weighted score computed from due-date proximity, scheduled date, priority, age
+(`dateCreated`), active time-tracking, tags, and project membership — higher means more urgent,
+and the score is shown next to the selected task and in the detail pane. Coefficients are
+configured under a top-level `urgency` key (all optional; shown here at their defaults):
+
+```yaml
+urgency:
+  due: 12.0            # coefficient for the due-date term
+  due_ramp_days: 14.0  # days out at which the due term starts rising from 0 (overdue = full weight)
+  scheduled: 5.0        # flat bonus once the scheduled date has arrived
+  active: 4.0           # bonus while actively time-tracked
+  age: 2.0              # coefficient for the age term
+  age_max_days: 365.0   # age (days since dateCreated) at which the age term saturates
+  project: 1.0          # flat bonus for belonging to any project
+  priority:
+    urgent: 9.0
+    high: 6.0
+    normal: 1.0
+    low: -3.0
+  tags:
+    next: 15.0           # per-tag bonus; add your own tags here
+```
+
+The computed score is also available as `urgency` in expression views, so you can build fully
+custom sorted/filtered views without touching `sort:`, e.g. `where: "urgency > 8 && !isCompleted"`.
+
+Taskwarrior's dependency-based urgency (`blocked`/`blocking`/`waiting`) isn't supported — this
+codebase has no dependency/blocking data model yet.
+
 ### Keybinds
 
 Keybinds map keys to commands. Multiple keys can map to the same command.

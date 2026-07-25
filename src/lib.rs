@@ -11,5 +11,6 @@ pub mod task_ops;
 pub mod time_tracking;
 pub mod tui_config;
 pub mod ui;
+pub mod urgency;
 pub mod validation;
 pub mod view_query;

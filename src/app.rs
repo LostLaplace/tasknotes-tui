@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 
 use crate::date::{apply_day_offset, apply_month_offset, get_date_part, today_local};
 use crate::repository::{TaskDraft, TaskFilter, TaskRecord, TaskRepository};
-use crate::tui_config::{KeyCommand, TuiConfig, ViewConfig, ViewFilter};
+use crate::tui_config::{KeyCommand, TuiConfig, ViewConfig, ViewFilter, ViewSort};
+use crate::urgency::compute_urgency;
 use crate::view_query::{compile_view_filters, CompiledViewFilter, ViewEvalSupport};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +288,15 @@ impl App {
             .filter(|task| self.matches_search(task))
             .cloned()
             .collect();
+        if matches!(self.current_view().map(|view| view.sort), Some(ViewSort::Urgency)) {
+            let today = today_local();
+            let urgency = &self.tui_config.urgency;
+            self.tasks.sort_by(|a, b| {
+                compute_urgency(b, &today, urgency)
+                    .partial_cmp(&compute_urgency(a, &today, urgency))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
         if self.selected >= self.tasks.len() && !self.tasks.is_empty() {
             self.selected = self.tasks.len() - 1;
         } else if self.tasks.is_empty() {
@@ -1247,6 +1257,7 @@ impl App {
             &self.repo.config.archive,
             support,
             self.active_project.as_ref(),
+            &self.tui_config.urgency,
         )
     }
 

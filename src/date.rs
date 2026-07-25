@@ -238,6 +238,12 @@ pub fn compare_day(a: &str, b: &str) -> Option<std::cmp::Ordering> {
     Some(a.cmp(&b))
 }
 
+pub fn days_between(from: &str, to: &str) -> Option<i64> {
+    let from = NaiveDate::parse_from_str(&get_date_part(from), "%Y-%m-%d").ok()?;
+    let to = NaiveDate::parse_from_str(&get_date_part(to), "%Y-%m-%d").ok()?;
+    Some((to - from).num_days())
+}
+
 pub fn year_month_day(value: &str) -> Option<(i32, u32, u32)> {
     let parsed = NaiveDate::parse_from_str(&get_date_part(value), "%Y-%m-%d").ok()?;
     Some((parsed.year(), parsed.month(), parsed.day()))

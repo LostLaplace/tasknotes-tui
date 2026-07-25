@@ -21,6 +21,7 @@ use crate::app::App;
 use crate::date::{get_date_part, today_local};
 use crate::repository::{is_archived_task, project_links};
 use crate::tui_config::KeyCommand;
+use crate::urgency::{compute_urgency, compute_urgency_breakdown, UrgencyTerm};
 
 pub fn run(mut app: App) -> Result<()> {
     enable_raw_mode()?;
@@ -247,7 +248,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
 
             let mut lines = vec![Line::from(primary)];
             if is_selected {
-                let secondary = selected_task_meta(task, is_archived);
+                let urgency = compute_urgency(task, &today_local(), &app.tui_config.urgency);
+                let secondary = selected_task_meta(task, is_archived, urgency);
                 if !secondary.is_empty() {
                     lines.push(Line::from(secondary));
                 }
@@ -334,6 +336,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         if let Some(due) = task.due.as_deref().filter(|value| !value.is_empty()) {
             lines.push(detail_line("Due", &get_date_part(due)));
         }
+        let urgency_breakdown = compute_urgency_breakdown(task, &today_local(), &app.tui_config.urgency);
+        let urgency_total: f64 = urgency_breakdown.iter().map(|term| term.contribution).sum();
+        lines.extend(urgency_detail_lines(&urgency_breakdown, urgency_total));
         if !project_list.is_empty() {
             lines.push(detail_line("Projects", &project_list));
         }
@@ -764,6 +769,20 @@ fn detail_line(label: &str, value: &str) -> Line<'static> {
     ])
 }
 
+fn urgency_detail_lines(breakdown: &[UrgencyTerm], total: f64) -> Vec<Line<'static>> {
+    let mut lines = vec![detail_line("Urgency", &format!("{total:.2}"))];
+    for term in breakdown {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  {:<16} {:>6.2} x {:>4.2} = {:>7.2}",
+                term.label, term.coefficient, term.value, term.contribution
+            ),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines
+}
+
 fn shortcut_line(app: &App) -> Line<'static> {
     let spans: Vec<Span<'static>> = app
         .contextual_shortcuts()
@@ -861,6 +880,7 @@ fn compact_task_meta(
 fn selected_task_meta(
     task: &crate::repository::TaskRecord,
     is_archived: bool,
+    urgency: f64,
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut push_value = |label: &str, value: String, style: Style| {
@@ -875,6 +895,11 @@ fn selected_task_meta(
         spans.push(Span::styled(value, style));
     };
 
+    push_value(
+        "urgency",
+        format!("{urgency:.1}"),
+        color_for_urgency(urgency),
+    );
     if let Some(priority) = task.priority.as_deref().filter(|value| !value.is_empty()) {
         push_value(
             "priority",
@@ -923,6 +948,17 @@ fn selected_task_meta(
         );
     }
     spans
+}
+
+fn color_for_urgency(urgency: f64) -> Style {
+    let color = if urgency >= 10.0 {
+        Color::Red
+    } else if urgency >= 5.0 {
+        Color::Yellow
+    } else {
+        Color::Gray
+    };
+    Style::default().fg(color)
 }
 
 fn compact_status_style(status: &str, is_archived: bool) -> Style {

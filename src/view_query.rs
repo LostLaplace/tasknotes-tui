@@ -14,6 +14,7 @@ use crate::date::{get_date_part, is_before_date_safe, today_local};
 use crate::field_mapping::{is_completed_status, FieldMapping};
 use crate::repository::{is_archived_task, resolve_task_project_paths, TaskRecord};
 use crate::tui_config::{ViewConfig, ViewFilter};
+use crate::urgency::{compute_urgency, UrgencyConfig};
 
 #[derive(Clone)]
 pub struct ViewEvalSupport {
@@ -88,6 +89,7 @@ impl CompiledViewFilter {
         archive: &ArchiveConfig,
         support: &ViewEvalSupport,
         active_project: Option<&ActiveProject>,
+        urgency_config: &UrgencyConfig,
     ) -> bool {
         match self {
             Self::BuiltIn(filter) => {
@@ -101,6 +103,7 @@ impl CompiledViewFilter {
                 archive,
                 support,
                 active_project,
+                urgency_config,
             ),
             Self::InvalidExpression { .. } => false,
         }
@@ -166,8 +169,17 @@ fn matches_expression_filter(
     archive: &ArchiveConfig,
     support: &ViewEvalSupport,
     active_project: Option<&ActiveProject>,
+    urgency_config: &UrgencyConfig,
 ) -> bool {
-    let context = build_eval_context(task, focus_date, mapping, archive, support, active_project);
+    let context = build_eval_context(
+        task,
+        focus_date,
+        mapping,
+        archive,
+        support,
+        active_project,
+        urgency_config,
+    );
     evaluate(expr, &context)
         .map(|value| is_truthy(&value))
         .unwrap_or(false)
@@ -180,6 +192,7 @@ fn build_eval_context(
     archive: &ArchiveConfig,
     support: &ViewEvalSupport,
     active_project: Option<&ActiveProject>,
+    urgency_config: &UrgencyConfig,
 ) -> EvalContext {
     let mut frontmatter = task.normalized_frontmatter.clone();
     frontmatter.insert("focusDate".into(), Value::String(focus_date.to_string()));
@@ -194,6 +207,13 @@ fn build_eval_context(
         Value::Bool(is_archived_task(task, archive)),
     );
     frontmatter.insert("path".into(), Value::String(task.path.clone()));
+    frontmatter.insert(
+        "urgency".into(),
+        Value::Number(
+            serde_json::Number::from_f64(compute_urgency(task, &today_local(), urgency_config))
+                .unwrap_or_else(|| serde_json::Number::from(0)),
+        ),
+    );
     let project_paths = resolve_task_project_paths(task, &support.all_files);
     frontmatter.insert(
         "projectPaths".into(),
@@ -302,6 +322,7 @@ mod tests {
             &EffectiveConfig::default().archive,
             &ViewEvalSupport::empty(),
             None,
+            &UrgencyConfig::default(),
         ));
     }
 
@@ -318,6 +339,7 @@ mod tests {
             &EffectiveConfig::default().archive,
             &ViewEvalSupport::empty(),
             None,
+            &UrgencyConfig::default(),
         ));
     }
 
@@ -335,6 +357,7 @@ mod tests {
             &EffectiveConfig::default().archive,
             &ViewEvalSupport::empty(),
             None,
+            &UrgencyConfig::default(),
         ));
     }
 }

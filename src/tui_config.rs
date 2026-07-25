@@ -5,12 +5,16 @@ use std::path::Path;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
 
+use crate::urgency::UrgencyConfig;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuiConfig {
     #[serde(default = "default_keybinds")]
     pub keybinds: BTreeMap<String, KeyCommand>,
     #[serde(default = "default_views")]
     pub views: BTreeMap<u8, ViewConfig>,
+    #[serde(default)]
+    pub urgency: UrgencyConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +22,16 @@ pub struct ViewConfig {
     pub label: String,
     #[serde(flatten)]
     pub filter: ViewFilter,
+    #[serde(default)]
+    pub sort: ViewSort,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewSort {
+    #[default]
+    Date,
+    Urgency,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,6 +183,7 @@ impl Default for TuiConfig {
         Self {
             keybinds: default_keybinds(),
             views: default_views(),
+            urgency: UrgencyConfig::default(),
         }
     }
 }
@@ -207,6 +222,7 @@ pub fn default_views() -> BTreeMap<u8, ViewConfig> {
             ViewConfig {
                 label: "Open".into(),
                 filter: ViewFilter::Open,
+                sort: ViewSort::Date,
             },
         ),
         (
@@ -214,6 +230,7 @@ pub fn default_views() -> BTreeMap<u8, ViewConfig> {
             ViewConfig {
                 label: "Date".into(),
                 filter: ViewFilter::Date,
+                sort: ViewSort::Date,
             },
         ),
         (
@@ -221,6 +238,7 @@ pub fn default_views() -> BTreeMap<u8, ViewConfig> {
             ViewConfig {
                 label: "Overdue".into(),
                 filter: ViewFilter::Overdue,
+                sort: ViewSort::Date,
             },
         ),
         (
@@ -228,6 +246,7 @@ pub fn default_views() -> BTreeMap<u8, ViewConfig> {
             ViewConfig {
                 label: "All".into(),
                 filter: ViewFilter::All,
+                sort: ViewSort::Date,
             },
         ),
         (
@@ -235,6 +254,7 @@ pub fn default_views() -> BTreeMap<u8, ViewConfig> {
             ViewConfig {
                 label: "Tracked".into(),
                 filter: ViewFilter::Tracked,
+                sort: ViewSort::Date,
             },
         ),
         (
@@ -242,6 +262,7 @@ pub fn default_views() -> BTreeMap<u8, ViewConfig> {
             ViewConfig {
                 label: "Archived".into(),
                 filter: ViewFilter::Archived,
+                sort: ViewSort::Date,
             },
         ),
         (
@@ -251,6 +272,7 @@ pub fn default_views() -> BTreeMap<u8, ViewConfig> {
                 filter: ViewFilter::Expression {
                     value: "hasActiveProject && projectPaths.contains(activeProjectPath) && path != activeProjectPath".into(),
                 },
+                sort: ViewSort::Date,
             },
         ),
     ])
