@@ -705,7 +705,7 @@ impl TaskRepository {
                 normalized.insert(field.to_string(), Value::String(value.to_string()));
             }
             None => {
-                normalized.remove(field);
+                normalized.insert(field.to_string(), Value::Null);
             }
         }
         self.write_task_update(task, normalized)
@@ -723,7 +723,7 @@ impl TaskRepository {
                 normalized.insert(field.to_string(), Value::String(value.to_string()));
             }
             None => {
-                normalized.remove(field);
+                normalized.insert(field.to_string(), Value::Null);
             }
         }
         self.write_task_update(task, normalized)
@@ -1476,6 +1476,40 @@ fields:
         let refreshed = repo.read_task(&task[0].path).unwrap();
         assert_eq!(refreshed.priority.as_deref(), Some("low"));
         assert_eq!(refreshed.status, "done");
+    }
+
+    #[test]
+    fn clearing_a_date_or_scalar_field_actually_removes_it() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task_from_draft(&TaskDraft {
+            title: "Clear me".into(),
+            details: "".into(),
+            due: Some("2026-04-03".into()),
+            scheduled: Some("2026-04-01".into()),
+            priority: Some("high".into()),
+            status: Some("doing".into()),
+            recurrence: None,
+            recurrence_anchor: None,
+            projects: vec![],
+        })
+        .unwrap();
+
+        let task = repo
+            .search_tasks(TaskFilter::All, Some("clear me"), &today_local())
+            .unwrap();
+        assert_eq!(task.len(), 1);
+
+        repo.update_date_field(&task[0], "scheduled", None).unwrap();
+        repo.update_scalar_field(&task[0], "priority", None)
+            .unwrap();
+
+        let refreshed = repo.read_task(&task[0].path).unwrap();
+        assert_eq!(refreshed.scheduled, None);
+        assert_eq!(refreshed.priority, None);
+        assert_eq!(refreshed.due.as_deref(), Some("2026-04-03"));
     }
 
     #[test]
