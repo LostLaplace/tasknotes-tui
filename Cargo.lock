@@ -1916,7 +1916,7 @@ dependencies = [
 
 [[package]]
 name = "tasknotes-tui"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "chrono",
