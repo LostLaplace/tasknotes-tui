@@ -74,6 +74,17 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             }
             return Ok(false);
         }
+        if app.is_option_picker_active() {
+            match key.code {
+                KeyCode::Esc => app.cancel_input()?,
+                KeyCode::Enter => app.submit_input()?,
+                KeyCode::Up | KeyCode::Char('k') => app.move_picker_option(-1),
+                KeyCode::Down | KeyCode::Char('j') => app.move_picker_option(1),
+                KeyCode::Char('/') => app.switch_option_picker_to_text(),
+                _ => {}
+            }
+            return Ok(false);
+        }
         match key.code {
             KeyCode::Esc => app.cancel_input()?,
             KeyCode::Enter => app.submit_input()?,
@@ -444,6 +455,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
     if app.is_date_picker_active() {
         draw_date_picker(frame, app);
     }
+    if app.is_option_picker_active() {
+        draw_option_picker(frame, app);
+    }
 }
 
 fn draw_calendar(
@@ -754,6 +768,53 @@ fn draw_date_picker(frame: &mut Frame<'_>, app: &App) {
         .block(Block::default().title("Help").borders(Borders::ALL))
         .wrap(Wrap { trim: false }),
         layout[2],
+    );
+}
+
+fn draw_option_picker(frame: &mut Frame<'_>, app: &App) {
+    let area = centered_rect(40, 50, frame.area());
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(3)])
+        .split(area);
+
+    frame.render_widget(Clear, area);
+    let title = app.input_prompt().unwrap_or("Select value");
+
+    let list_items: Vec<ListItem> = app
+        .picker_options
+        .iter()
+        .map(|option| ListItem::new(Line::from(option.as_str())))
+        .collect();
+
+    let mut state = ListState::default();
+    if !app.picker_options.is_empty() {
+        state.select(Some(app.picker_option_index));
+    }
+
+    frame.render_stateful_widget(
+        List::new(list_items)
+            .block(
+                Block::default()
+                    .title(title)
+                    .borders(Borders::ALL)
+                    .style(Style::default().bg(Color::Black)),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Blue)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        layout[0],
+        &mut state,
+    );
+
+    frame.render_widget(
+        Paragraph::new("Move up/down or j/k  Enter save  / type custom value  Esc cancel")
+            .block(Block::default().title("Help").borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+        layout[1],
     );
 }
 

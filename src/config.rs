@@ -20,6 +20,12 @@ pub struct StatusConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriorityConfig {
+    pub values: Vec<String>,
+    pub default: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DefaultsConfig {
     pub status: String,
     pub priority: String,
@@ -51,6 +57,7 @@ pub struct EffectiveConfig {
     pub mapping: BTreeMap<String, String>,
     pub title: TitleConfig,
     pub status: StatusConfig,
+    pub priority: PriorityConfig,
     pub defaults: DefaultsConfig,
     pub task_detection: TaskDetectionConfig,
     pub archive: ArchiveConfig,
@@ -92,6 +99,10 @@ impl Default for EffectiveConfig {
                 ],
                 default: "open".into(),
                 completed_values: vec!["done".into(), "cancelled".into()],
+            },
+            priority: PriorityConfig {
+                values: vec!["low".into(), "normal".into(), "high".into()],
+                default: "normal".into(),
             },
             defaults: DefaultsConfig {
                 status: "open".into(),
@@ -263,6 +274,23 @@ pub fn map_tasknotes_plugin_config(data: &Value) -> Value {
             status.insert("completed_values".into(), Value::Array(completed));
         }
         out.insert("status".into(), Value::Object(status));
+    }
+
+    if let Some(priorities) = source.get("customPriorities").and_then(Value::as_array) {
+        let values: Vec<Value> = priorities
+            .iter()
+            .filter_map(|entry| entry.get("value").and_then(Value::as_str))
+            .map(|v| Value::String(v.to_string()))
+            .collect();
+
+        let mut priority = Map::new();
+        if !values.is_empty() {
+            priority.insert("values".into(), Value::Array(values));
+        }
+        if let Some(default) = source.get("defaultTaskPriority").and_then(Value::as_str) {
+            priority.insert("default".into(), Value::String(default.to_string()));
+        }
+        out.insert("priority".into(), Value::Object(priority));
     }
 
     let mut defaults = Map::new();
@@ -666,6 +694,18 @@ pub fn normalize_effective_config(config_value: Value) -> EffectiveConfig {
         }
         if let Some(value) = defaults.get("priority").and_then(Value::as_str) {
             config.defaults.priority = value.to_string();
+        }
+    }
+    if let Some(priority) = obj.get("priority").and_then(Value::as_object) {
+        if let Some(values) = priority.get("values").and_then(Value::as_array) {
+            config.priority.values = values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+        }
+        if let Some(default) = priority.get("default").and_then(Value::as_str) {
+            config.priority.default = default.to_string();
         }
     }
     if let Some(detection) = obj.get("task_detection").and_then(Value::as_object) {

@@ -20,6 +20,10 @@ pub enum InputMode {
     TextCreateScheduled,
     TextEditDue,
     TextEditScheduled,
+    PickCreatePriority,
+    PickCreateStatus,
+    PickEditPriority,
+    PickEditStatus,
     QuickCreateTitle,
     CreateTitle,
     CreateDetails,
@@ -60,6 +64,8 @@ pub struct App {
     pub calendar_tasks: Vec<TaskRecord>,
     pub picker_date: String,
     pub picker_has_value: bool,
+    pub picker_options: Vec<String>,
+    pub picker_option_index: usize,
     pub pending_open_editor: bool,
     pub active_project: Option<ActiveProject>,
 }
@@ -260,6 +266,8 @@ impl App {
             calendar_tasks: Vec::new(),
             picker_date: today_local(),
             picker_has_value: true,
+            picker_options: Vec::new(),
+            picker_option_index: 0,
             pending_open_editor: false,
             active_project: None,
         };
@@ -588,17 +596,17 @@ impl App {
 
     pub fn begin_edit_priority(&mut self) {
         if let Some(task) = self.selected_task().cloned() {
-            self.input_mode = InputMode::EditPriority;
-            self.input_value = task.priority.unwrap_or_default();
-            self.status = "Edit priority (blank clears)".to_string();
+            let options = self.repo.config.priority.values.clone();
+            self.begin_option_picker(InputMode::PickEditPriority, options, task.priority.as_deref());
+            self.status = "Edit priority: arrows move, enter saves, / type".to_string();
         }
     }
 
     pub fn begin_edit_status(&mut self) {
         if let Some(task) = self.selected_task().cloned() {
-            self.input_mode = InputMode::EditStatus;
-            self.input_value = task.status;
-            self.status = "Edit status".to_string();
+            let options = self.repo.config.status.values.clone();
+            self.begin_option_picker(InputMode::PickEditStatus, options, Some(task.status.as_str()));
+            self.status = "Edit status: arrows move, enter saves, / type".to_string();
         }
     }
 
@@ -733,9 +741,8 @@ impl App {
             }
             InputMode::PickCreateScheduled => {
                 self.draft.scheduled = self.current_picker_value();
-                self.input_mode = InputMode::CreatePriority;
-                self.input_value = self.repo.config.defaults.priority.clone();
-                self.status = "New task: priority".to_string();
+                self.begin_create_priority_picker();
+                self.status = "New task: priority, arrows move, enter saves, / type".to_string();
             }
             InputMode::PickEditDue => {
                 if let Some(task) = self.selected_task().cloned() {
@@ -761,6 +768,42 @@ impl App {
                     self.status = format!("Updated scheduled date for {}", task.title);
                 }
             }
+            InputMode::PickCreatePriority => {
+                self.draft.priority = self.current_picker_option();
+                self.begin_create_status_picker();
+                self.status = "New task: status, arrows move, enter saves, / type".to_string();
+            }
+            InputMode::PickCreateStatus => {
+                self.draft.status = self.current_picker_option();
+                self.input_mode = InputMode::CreateRecurrence;
+                self.input_value.clear();
+                self.status =
+                    "New task: recurrence rule (RRULE..., blank for non-recurring)".to_string();
+            }
+            InputMode::PickEditPriority => {
+                if let Some(task) = self.selected_task().cloned() {
+                    let value = self.current_picker_option();
+                    let updated =
+                        self.repo
+                            .update_scalar_field(&task, "priority", value.as_deref())?;
+                    self.replace_cached_task(&task.path, updated);
+                    self.input_mode = InputMode::None;
+                    self.input_value.clear();
+                    self.status = format!("Updated priority for {}", task.title);
+                }
+            }
+            InputMode::PickEditStatus => {
+                if let Some(task) = self.selected_task().cloned() {
+                    let value = self.current_picker_option();
+                    let updated =
+                        self.repo
+                            .update_scalar_field(&task, "status", value.as_deref())?;
+                    self.replace_cached_task(&task.path, updated);
+                    self.input_mode = InputMode::None;
+                    self.input_value.clear();
+                    self.status = format!("Updated status for {}", task.title);
+                }
+            }
             InputMode::TextCreateDue => {
                 self.draft.due = option_from_input(&self.input_value);
                 let initial = self.draft.scheduled.clone();
@@ -771,9 +814,8 @@ impl App {
             }
             InputMode::TextCreateScheduled => {
                 self.draft.scheduled = option_from_input(&self.input_value);
-                self.input_mode = InputMode::CreatePriority;
-                self.input_value = self.repo.config.defaults.priority.clone();
-                self.status = "New task: priority".to_string();
+                self.begin_create_priority_picker();
+                self.status = "New task: priority, arrows move, enter saves, / type".to_string();
             }
             InputMode::TextEditDue => {
                 if let Some(task) = self.selected_task().cloned() {
@@ -842,9 +884,8 @@ impl App {
             }
             InputMode::CreatePriority => {
                 self.draft.priority = option_from_input(&self.input_value);
-                self.input_mode = InputMode::CreateStatus;
-                self.input_value = self.repo.config.defaults.status.clone();
-                self.status = "New task: status".to_string();
+                self.begin_create_status_picker();
+                self.status = "New task: status, arrows move, enter saves, / type".to_string();
             }
             InputMode::CreateStatus => {
                 self.draft.status = option_from_input(&self.input_value);
@@ -971,6 +1012,10 @@ impl App {
             InputMode::TextCreateScheduled => "Type scheduled date",
             InputMode::TextEditDue => "Type due date",
             InputMode::TextEditScheduled => "Type scheduled date",
+            InputMode::PickCreatePriority => "Pick priority",
+            InputMode::PickCreateStatus => "Pick status",
+            InputMode::PickEditPriority => "Pick priority",
+            InputMode::PickEditStatus => "Pick status",
             InputMode::QuickCreateTitle => "Quick create",
             InputMode::CreateTitle => "New title",
             InputMode::CreateDetails => "New details",
@@ -1003,6 +1048,12 @@ impl App {
             InputMode::TextCreateScheduled | InputMode::TextEditScheduled => {
                 "Type Scheduled Date".to_string()
             }
+            InputMode::PickCreatePriority | InputMode::PickEditPriority => {
+                "Priority Picker".to_string()
+            }
+            InputMode::PickCreateStatus | InputMode::PickEditStatus => {
+                "Status Picker".to_string()
+            }
             InputMode::QuickCreateTitle => "Quick Create".to_string(),
             InputMode::ConfirmDelete => "Confirm Delete".to_string(),
             InputMode::EditTitle => "Edit Title".to_string(),
@@ -1025,8 +1076,8 @@ impl App {
             InputMode::CreateDetails => (2, 7, "Details"),
             InputMode::PickCreateDue | InputMode::TextCreateDue => (3, 7, "Due"),
             InputMode::PickCreateScheduled | InputMode::TextCreateScheduled => (4, 7, "Scheduled"),
-            InputMode::CreatePriority => (5, 7, "Priority"),
-            InputMode::CreateStatus => (6, 7, "Status"),
+            InputMode::PickCreatePriority | InputMode::CreatePriority => (5, 7, "Priority"),
+            InputMode::PickCreateStatus | InputMode::CreateStatus => (6, 7, "Status"),
             InputMode::CreateRecurrence => (7, 7, "Recurrence"),
             InputMode::CreateRecurrenceAnchor => (7, 7, "Anchor"),
             _ => return None,
@@ -1119,6 +1170,14 @@ impl App {
                 ("Clear".to_string(), "blank".to_string()),
                 ("Cancel".to_string(), "esc".to_string()),
             ],
+            InputMode::PickCreatePriority
+            | InputMode::PickCreateStatus
+            | InputMode::PickEditPriority
+            | InputMode::PickEditStatus => vec![
+                ("Move".to_string(), "up/down or j/k".to_string()),
+                ("Apply".to_string(), "enter".to_string()),
+                ("Other".to_string(), "/ type custom value".to_string()),
+            ],
             _ => vec![
                 ("Submit".to_string(), "enter".to_string()),
                 ("Cancel".to_string(), "esc".to_string()),
@@ -1141,6 +1200,16 @@ impl App {
                 | InputMode::PickCreateScheduled
                 | InputMode::PickEditDue
                 | InputMode::PickEditScheduled
+        )
+    }
+
+    pub fn is_option_picker_active(&self) -> bool {
+        matches!(
+            self.input_mode,
+            InputMode::PickCreatePriority
+                | InputMode::PickCreateStatus
+                | InputMode::PickEditPriority
+                | InputMode::PickEditStatus
         )
     }
 
@@ -1289,6 +1358,54 @@ impl App {
         } else {
             None
         }
+    }
+
+    fn begin_option_picker(&mut self, mode: InputMode, options: Vec<String>, current: Option<&str>) {
+        self.input_mode = mode;
+        self.input_value.clear();
+        let index = current
+            .and_then(|value| options.iter().position(|option| option == value))
+            .unwrap_or(0);
+        self.picker_options = options;
+        self.picker_option_index = index;
+    }
+
+    pub fn move_picker_option(&mut self, offset: isize) {
+        if self.picker_options.is_empty() {
+            return;
+        }
+        let len = self.picker_options.len() as isize;
+        let mut next = self.picker_option_index as isize + offset;
+        next = ((next % len) + len) % len;
+        self.picker_option_index = next as usize;
+    }
+
+    fn current_picker_option(&self) -> Option<String> {
+        self.picker_options.get(self.picker_option_index).cloned()
+    }
+
+    fn begin_create_priority_picker(&mut self) {
+        let options = self.repo.config.priority.values.clone();
+        let default = self.repo.config.defaults.priority.clone();
+        self.begin_option_picker(InputMode::PickCreatePriority, options, Some(&default));
+    }
+
+    fn begin_create_status_picker(&mut self) {
+        let options = self.repo.config.status.values.clone();
+        let default = self.repo.config.defaults.status.clone();
+        self.begin_option_picker(InputMode::PickCreateStatus, options, Some(&default));
+    }
+
+    pub fn switch_option_picker_to_text(&mut self) {
+        self.input_value = self.current_picker_option().unwrap_or_default();
+        self.input_mode = match self.input_mode {
+            InputMode::PickCreatePriority => InputMode::CreatePriority,
+            InputMode::PickCreateStatus => InputMode::CreateStatus,
+            InputMode::PickEditPriority => InputMode::EditPriority,
+            InputMode::PickEditStatus => InputMode::EditStatus,
+            other => other,
+        };
+        self.status = "Type value, blank clears".to_string();
     }
 
     pub fn current_view(&self) -> Option<&ViewConfig> {
@@ -1639,5 +1756,104 @@ fields:
             .find(|t| t.path == task.path)
             .unwrap();
         assert_eq!(updated.status, "next_action");
+    }
+
+    #[test]
+    fn edit_status_picker_moves_selection_and_saves_on_submit() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        let task = repo
+            .create_task_from_draft(&TaskDraft {
+                title: "Triage inbox item".into(),
+                details: String::new(),
+                due: None,
+                scheduled: None,
+                priority: None,
+                status: Some("inbox".into()),
+                recurrence: None,
+                recurrence_anchor: None,
+                projects: vec![],
+            })
+            .unwrap();
+
+        let config = TuiConfig::default();
+        let mut app = App::new(repo, config).unwrap();
+        app.repo.config.status.values = vec![
+            "none".into(),
+            "inbox".into(),
+            "next_action".into(),
+            "done".into(),
+        ];
+        app.selected = app
+            .tasks
+            .iter()
+            .position(|t| t.path == task.path)
+            .unwrap();
+
+        app.begin_edit_status();
+        assert_eq!(app.input_mode, InputMode::PickEditStatus);
+        assert_eq!(app.picker_option_index, 1); // "inbox"
+
+        app.move_picker_option(2); // inbox -> next_action -> done
+        assert_eq!(app.picker_option_index, 3); // "done"
+
+        app.submit_input().unwrap();
+        assert_eq!(app.input_mode, InputMode::None);
+
+        let updated = app
+            .all_tasks
+            .iter()
+            .find(|t| t.path == task.path)
+            .unwrap();
+        assert_eq!(updated.status, "done");
+    }
+
+    #[test]
+    fn edit_priority_picker_moves_selection_and_saves_on_submit() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        let task = repo
+            .create_task_from_draft(&TaskDraft {
+                title: "Triage inbox item".into(),
+                details: String::new(),
+                due: None,
+                scheduled: None,
+                priority: Some("normal".into()),
+                status: None,
+                recurrence: None,
+                recurrence_anchor: None,
+                projects: vec![],
+            })
+            .unwrap();
+
+        let config = TuiConfig::default();
+        let mut app = App::new(repo, config).unwrap();
+        app.repo.config.priority.values = vec!["low".into(), "normal".into(), "high".into()];
+        app.selected = app
+            .tasks
+            .iter()
+            .position(|t| t.path == task.path)
+            .unwrap();
+
+        app.begin_edit_priority();
+        assert_eq!(app.input_mode, InputMode::PickEditPriority);
+        assert_eq!(app.picker_option_index, 1); // "normal"
+
+        app.move_picker_option(1); // normal -> high
+        assert_eq!(app.picker_option_index, 2);
+
+        app.submit_input().unwrap();
+        assert_eq!(app.input_mode, InputMode::None);
+
+        let updated = app
+            .all_tasks
+            .iter()
+            .find(|t| t.path == task.path)
+            .unwrap();
+        assert_eq!(updated.priority.as_deref(), Some("high"));
     }
 }

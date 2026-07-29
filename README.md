@@ -203,7 +203,15 @@ keybinds:
   l: focus_next_day
 ```
 
-`edit_status` (default `t`) opens a free-text prompt. To jump straight to a fixed status value without typing, bind a key to `set_status:<value>`:
+`edit_status` (default `t`) and `edit_priority` (default `p`) open a picker listing the
+configured status/priority values (from `customStatuses`/`customPriorities` in the
+TaskNotes plugin config, or the built-in defaults). Use up/down or `j`/`k` to move,
+`enter` to save, or `/` to fall back to free-text entry for a value not in the list.
+The "New Task" flow uses the same pickers for its priority and status steps, so
+creating a task no longer requires typing status/priority by hand.
+
+To jump straight to a fixed status value without opening any prompt, bind a key to
+`set_status:<value>`:
 
 ```yaml
 keybinds:
