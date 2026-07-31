@@ -477,14 +477,19 @@ impl TaskRepository {
         anyhow::ensure!(!draft.title.trim().is_empty(), "title must not be empty");
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let mut fields = Map::new();
-        fields.insert(
-            self.config
-                .mapping
-                .get("title")
-                .cloned()
-                .unwrap_or_else(|| "title".into()),
-            Value::String(draft.title.trim().to_string()),
-        );
+        // When titles are stored in the filename, don't also duplicate the title
+        // as a frontmatter property (matches how TaskNotes itself behaves, and how
+        // display title already falls back to the filename via resolve_display_title).
+        if self.config.title.storage != "filename" {
+            fields.insert(
+                self.config
+                    .mapping
+                    .get("title")
+                    .cloned()
+                    .unwrap_or_else(|| "title".into()),
+                Value::String(draft.title.trim().to_string()),
+            );
+        }
         fields.insert(
             self.config
                 .mapping
@@ -599,11 +604,18 @@ impl TaskRepository {
             .and_then(|result| result.get("path").and_then(Value::as_str))
             .map(str::to_string)
             .unwrap_or_else(|| {
-                let slug = slugify(&draft.title);
+                // When titles are stored in the filename (no frontmatter title
+                // property), keep the human-readable title instead of an
+                // aggressively slugified version, matching TaskNotes' own behavior.
+                let file_stem = if self.config.title.storage == "filename" {
+                    sanitize_filename_component(&draft.title)
+                } else {
+                    slugify(&draft.title)
+                };
                 format!(
                     "{}/{}.md",
                     self.config.task_detection.default_folder.trim_matches('/'),
-                    slug
+                    file_stem
                 )
             });
         let create_fields = compat
@@ -875,6 +887,28 @@ fn slugify(value: &str) -> String {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("-")
+}
+
+/// Lightly sanitizes a title for use as a filename, preserving case, spaces,
+/// and most punctuation. Only strips characters that are invalid across
+/// common filesystems, unlike `slugify` which is far more aggressive.
+fn sanitize_filename_component(value: &str) -> String {
+    let cleaned: String = value
+        .chars()
+        .filter(|ch| !matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        .collect();
+    let trimmed = cleaned
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches('.')
+        .trim()
+        .to_string();
+    if trimmed.is_empty() {
+        "untitled".to_string()
+    } else {
+        trimmed
+    }
 }
 
 pub fn is_archived_task(task: &TaskRecord, archive: &ArchiveConfig) -> bool {
