@@ -72,7 +72,7 @@ When the date view (`2`) is active, the task list shows tasks for the focused da
 | `T` | Start / stop time tracking |
 | `S` | Skip / unskip a recurring instance |
 | `P` | Toggle active project on selected task |
-| `n` | Create task (multi-step: title, dates, priority, status, recurrence) |
+| `n` | Create task (multi-step: title, details, project, dates, priority, status, recurrence) |
 | `c` | Quick create (title only, no dates, linked to active project if set) |
 | `e` | Edit title |
 | `i` | Open in `$EDITOR` |
@@ -124,6 +124,9 @@ page.
 
 - `Enter` — drill into the selected project's tasks (the normal task list, fully interactive)
 - `Esc` — back out to the project summary list
+- `Shift-N` — add a next action: a title-only quick-create for a task linked to the
+  highlighted project, with status pre-set to the first configured `next_action_statuses`
+  value (see Configuration below). Requires `next_action_statuses` to be configured.
 - `/` search filters project rows by title while the list is showing
 
 This is unrelated to the `Shift-P` active-project mechanism above — it doesn't use or change the
@@ -247,6 +250,13 @@ TaskNotes plugin config, or the built-in defaults). Use up/down or `j`/`k` to mo
 `enter` to save, or `/` to fall back to free-text entry for a value not in the list.
 The "New Task" flow uses the same pickers for its priority and status steps, so
 creating a task no longer requires typing status/priority by hand.
+
+The "New Task" flow's project step works the same way, listing every existing project
+(see "Projects view" above) plus a `(none)` option. Pressing `/` on that step lets you type
+a brand-new project name instead — since projects don't need a backing note, this creates a
+phantom project the same way typing an unrecognized wikilink into `projects:` by hand would.
+Leaving the project step on `(none)` falls back to linking the active project, if one is set
+(`Shift-P`), matching quick create's existing behavior.
 
 To jump straight to a fixed status value without opening any prompt, bind a key to
 `set_status:<value>`:

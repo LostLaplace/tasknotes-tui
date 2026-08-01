@@ -25,13 +25,16 @@ pub enum InputMode {
     TextEditScheduled,
     PickCreatePriority,
     PickCreateStatus,
+    PickCreateProject,
     PickEditPriority,
     PickEditStatus,
     QuickCreateTitle,
+    AddNextActionTitle,
     CreateTitle,
     CreateDetails,
     CreatePriority,
     CreateStatus,
+    CreateProject,
     CreateRecurrence,
     CreateRecurrenceAnchor,
     ConfirmDelete,
@@ -84,6 +87,9 @@ pub struct App {
     pub project_rows: Vec<ProjectSummary>,
     pub project_selected: usize,
     pub project_drilldown: Option<ProjectDrilldown>,
+    /// The target project's `projects:` link text, set by `begin_add_next_action` and
+    /// consumed when `InputMode::AddNextActionTitle` is submitted.
+    pub add_next_action_project: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +116,7 @@ pub enum PaletteCommand {
     ClearActiveProject,
     EnterProject,
     LeaveProject,
+    AddNextAction,
 }
 
 pub struct PaletteItem {
@@ -166,6 +173,14 @@ fn static_palette_items() -> Vec<PaletteItem> {
             title: "Back to projects".into(),
             aliases: vec!["leave project".into(), "esc".into()],
             description: "Return to the project summary list (Projects view)".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::AddNextAction,
+            title: "Add next action".into(),
+            aliases: vec!["next action".into(), "N".into()],
+            description: "Create a task linked to the highlighted project (Projects view)"
+                .into(),
             hotkey: None,
         },
         PaletteItem {
@@ -305,6 +320,7 @@ impl App {
             project_rows: Vec::new(),
             project_selected: 0,
             project_drilldown: None,
+            add_next_action_project: None,
         };
         app.reload_from_disk()?;
         Ok(app)
@@ -481,6 +497,30 @@ impl App {
         }
         self.project_drilldown = None;
         self.apply_filters();
+    }
+
+    /// Starts a title-only quick-create prompt for a new task linked to the highlighted
+    /// project, pre-set to the first configured `next_action_statuses` value. No-op
+    /// unless the Projects view is showing the summary list, or if no next-action
+    /// status is configured (there'd be nothing meaningful to set).
+    pub fn begin_add_next_action(&mut self) {
+        if !self.is_showing_project_list() {
+            return;
+        }
+        if self.tui_config.next_action_statuses.is_empty() {
+            self.status = "Configure next_action_statuses to use this".to_string();
+            return;
+        }
+        let Some((link_text, display_title)) = self
+            .selected_project_row()
+            .map(|row| (row.link_text.clone(), row.display_title.clone()))
+        else {
+            return;
+        };
+        self.add_next_action_project = Some(link_text);
+        self.input_mode = InputMode::AddNextActionTitle;
+        self.input_value.clear();
+        self.status = format!("Add next action for {display_title}: enter title");
     }
 
     pub fn next(&mut self) {
@@ -1011,6 +1051,30 @@ impl App {
                     self.status = format!("Quick created {}", title);
                 }
             }
+            InputMode::AddNextActionTitle => {
+                let title = self.input_value.trim().to_string();
+                if title.is_empty() {
+                    self.status = "Title must not be empty".to_string();
+                } else {
+                    let project_link = self.add_next_action_project.take();
+                    let status = self.tui_config.next_action_statuses.first().cloned();
+                    let created = self.repo.create_task_from_draft(&TaskDraft {
+                        title: title.clone(),
+                        details: String::new(),
+                        due: None,
+                        scheduled: None,
+                        priority: None,
+                        status,
+                        recurrence: None,
+                        recurrence_anchor: None,
+                        projects: project_link.into_iter().collect(),
+                    })?;
+                    self.input_mode = InputMode::None;
+                    self.input_value.clear();
+                    self.append_cached_task(created);
+                    self.status = format!("Added next action {}", title);
+                }
+            }
             InputMode::CreateTitle => {
                 let title = self.input_value.trim();
                 if title.is_empty() {
@@ -1024,6 +1088,26 @@ impl App {
             }
             InputMode::CreateDetails => {
                 self.draft.details = self.input_value.clone();
+                self.begin_create_project_picker();
+                self.status =
+                    "New task: project, arrows move, enter saves, / new project".to_string();
+            }
+            InputMode::PickCreateProject => {
+                let selected = self.current_picker_option();
+                self.draft.projects = self.resolve_project_option(selected.as_deref());
+                let initial = self.draft.due.clone();
+                self.begin_date_picker(InputMode::PickCreateDue, initial.as_deref());
+                self.status =
+                    "New task: due date, arrows move, H/L month, t today, c clear, / type"
+                        .to_string();
+            }
+            InputMode::CreateProject => {
+                let title = self.input_value.trim();
+                self.draft.projects = if title.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![format!("[[{title}]]")]
+                };
                 let initial = self.draft.due.clone();
                 self.begin_date_picker(InputMode::PickCreateDue, initial.as_deref());
                 self.status =
@@ -1050,7 +1134,9 @@ impl App {
                     self.status =
                         "New task: recurrence anchor (scheduled or completion)".to_string();
                 } else {
-                    self.draft.projects = self.active_project_links()?;
+                    if self.draft.projects.is_empty() {
+                        self.draft.projects = self.active_project_links()?;
+                    }
                     let title = self.draft.title.clone();
                     let created = self.repo.create_task_from_draft(&self.draft)?;
                     self.input_mode = InputMode::None;
@@ -1061,7 +1147,9 @@ impl App {
             }
             InputMode::CreateRecurrenceAnchor => {
                 self.draft.recurrence_anchor = option_from_input(&self.input_value);
-                self.draft.projects = self.active_project_links()?;
+                if self.draft.projects.is_empty() {
+                    self.draft.projects = self.active_project_links()?;
+                }
                 let title = self.draft.title.clone();
                 let created = self.repo.create_task_from_draft(&self.draft)?;
                 self.input_mode = InputMode::None;
@@ -1162,13 +1250,16 @@ impl App {
             InputMode::TextEditScheduled => "Type scheduled date",
             InputMode::PickCreatePriority => "Pick priority",
             InputMode::PickCreateStatus => "Pick status",
+            InputMode::PickCreateProject => "Pick project",
             InputMode::PickEditPriority => "Pick priority",
             InputMode::PickEditStatus => "Pick status",
             InputMode::QuickCreateTitle => "Quick create",
+            InputMode::AddNextActionTitle => "Add next action",
             InputMode::CreateTitle => "New title",
             InputMode::CreateDetails => "New details",
             InputMode::CreatePriority => "New priority",
             InputMode::CreateStatus => "New status",
+            InputMode::CreateProject => "New project",
             InputMode::CreateRecurrence => "New recurrence",
             InputMode::CreateRecurrenceAnchor => "New recurrence anchor",
             InputMode::ConfirmDelete => "Confirm delete",
@@ -1210,7 +1301,9 @@ impl App {
             InputMode::PickCreateStatus | InputMode::PickEditStatus => {
                 "Status Picker".to_string()
             }
+            InputMode::PickCreateProject => "Project Picker".to_string(),
             InputMode::QuickCreateTitle => "Quick Create".to_string(),
+            InputMode::AddNextActionTitle => "Add Next Action".to_string(),
             InputMode::ConfirmDelete => "Confirm Delete".to_string(),
             InputMode::EditTitle => "Edit Title".to_string(),
             InputMode::EditPriority => "Edit Priority".to_string(),
@@ -1221,6 +1314,7 @@ impl App {
             | InputMode::CreateDetails
             | InputMode::CreatePriority
             | InputMode::CreateStatus
+            | InputMode::CreateProject
             | InputMode::CreateRecurrence
             | InputMode::CreateRecurrenceAnchor => "Create".to_string(),
         }
@@ -1228,14 +1322,15 @@ impl App {
 
     pub fn create_progress(&self) -> Option<(usize, usize, &'static str)> {
         let progress = match self.input_mode {
-            InputMode::CreateTitle => (1, 7, "Title"),
-            InputMode::CreateDetails => (2, 7, "Details"),
-            InputMode::PickCreateDue | InputMode::TextCreateDue => (3, 7, "Due"),
-            InputMode::PickCreateScheduled | InputMode::TextCreateScheduled => (4, 7, "Scheduled"),
-            InputMode::PickCreatePriority | InputMode::CreatePriority => (5, 7, "Priority"),
-            InputMode::PickCreateStatus | InputMode::CreateStatus => (6, 7, "Status"),
-            InputMode::CreateRecurrence => (7, 7, "Recurrence"),
-            InputMode::CreateRecurrenceAnchor => (7, 7, "Anchor"),
+            InputMode::CreateTitle => (1, 8, "Title"),
+            InputMode::CreateDetails => (2, 8, "Details"),
+            InputMode::PickCreateProject | InputMode::CreateProject => (3, 8, "Project"),
+            InputMode::PickCreateDue | InputMode::TextCreateDue => (4, 8, "Due"),
+            InputMode::PickCreateScheduled | InputMode::TextCreateScheduled => (5, 8, "Scheduled"),
+            InputMode::PickCreatePriority | InputMode::CreatePriority => (6, 8, "Priority"),
+            InputMode::PickCreateStatus | InputMode::CreateStatus => (7, 8, "Status"),
+            InputMode::CreateRecurrence => (8, 8, "Recurrence"),
+            InputMode::CreateRecurrenceAnchor => (8, 8, "Anchor"),
             _ => return None,
         };
         Some(progress)
@@ -1292,6 +1387,10 @@ impl App {
                 (
                     "Open".to_string(),
                     self.binding_label(KeyCommand::EnterProject, "enter"),
+                ),
+                (
+                    "Next action".to_string(),
+                    self.binding_label(KeyCommand::AddNextAction, "N"),
                 ),
             ];
         }
@@ -1405,6 +1504,7 @@ impl App {
             self.input_mode,
             InputMode::PickCreatePriority
                 | InputMode::PickCreateStatus
+                | InputMode::PickCreateProject
                 | InputMode::PickEditPriority
                 | InputMode::PickEditStatus
         )
@@ -1505,6 +1605,7 @@ impl App {
             PaletteCommand::ClearActiveProject => self.clear_active_project(),
             PaletteCommand::EnterProject => self.enter_selected_project(),
             PaletteCommand::LeaveProject => self.exit_project_drilldown(),
+            PaletteCommand::AddNextAction => self.begin_add_next_action(),
         }
         Ok(())
     }
@@ -1583,6 +1684,45 @@ impl App {
         self.picker_options.get(self.picker_option_index).cloned()
     }
 
+    const NO_PROJECT_OPTION: &'static str = "(none)";
+
+    fn project_summaries(&self) -> Vec<ProjectSummary> {
+        let Some(support) = self.view_eval_support.as_ref() else {
+            return Vec::new();
+        };
+        build_project_summaries(
+            &self.all_tasks,
+            &support.all_files,
+            &self.repo.field_mapping,
+            &self.repo.config.archive,
+            &self.tui_config.next_action_statuses,
+        )
+    }
+
+    fn begin_create_project_picker(&mut self) {
+        let rows = self.project_summaries();
+        let mut options = vec![Self::NO_PROJECT_OPTION.to_string()];
+        options.extend(rows.into_iter().map(|row| row.display_title));
+        self.begin_option_picker(InputMode::PickCreateProject, options, Some(Self::NO_PROJECT_OPTION));
+    }
+
+    /// Resolves a project picker's selected label (an existing project's display title,
+    /// or the "(none)" sentinel) back to `projects:` link text. A label that doesn't
+    /// match any known project (only reachable via free-text entry) is treated as the
+    /// title of a brand-new phantom project.
+    fn resolve_project_option(&self, label: Option<&str>) -> Vec<String> {
+        match label {
+            None => Vec::new(),
+            Some(label) if label == Self::NO_PROJECT_OPTION => Vec::new(),
+            Some(title) => self
+                .project_summaries()
+                .into_iter()
+                .find(|row| row.display_title == title)
+                .map(|row| vec![row.link_text])
+                .unwrap_or_else(|| vec![format!("[[{title}]]")]),
+        }
+    }
+
     fn begin_create_priority_picker(&mut self) {
         let options = self.repo.config.priority.values.clone();
         let default = self.repo.config.defaults.priority.clone();
@@ -1596,15 +1736,27 @@ impl App {
     }
 
     pub fn switch_option_picker_to_text(&mut self) {
-        self.input_value = self.current_picker_option().unwrap_or_default();
+        let is_project_picker = self.input_mode == InputMode::PickCreateProject;
+        self.input_value = if is_project_picker {
+            // Prefilling with "(none)" or an existing project's title isn't useful here
+            // — free-text entry on the project step is for typing a brand-new project.
+            String::new()
+        } else {
+            self.current_picker_option().unwrap_or_default()
+        };
         self.input_mode = match self.input_mode {
             InputMode::PickCreatePriority => InputMode::CreatePriority,
             InputMode::PickCreateStatus => InputMode::CreateStatus,
+            InputMode::PickCreateProject => InputMode::CreateProject,
             InputMode::PickEditPriority => InputMode::EditPriority,
             InputMode::PickEditStatus => InputMode::EditStatus,
             other => other,
         };
-        self.status = "Type value, blank clears".to_string();
+        self.status = if is_project_picker {
+            "Type new project title, blank = no project".to_string()
+        } else {
+            "Type value, blank clears".to_string()
+        };
     }
 
     pub fn current_view(&self) -> Option<&ViewConfig> {
@@ -1669,6 +1821,7 @@ impl App {
             PaletteCommand::ClearActiveProject => return None,
             PaletteCommand::EnterProject => KeyCommand::EnterProject,
             PaletteCommand::LeaveProject => KeyCommand::LeaveProject,
+            PaletteCommand::AddNextAction => KeyCommand::AddNextAction,
         };
         let bindings = self.tui_config.bindings_for_command(key_command);
         (!bindings.is_empty()).then(|| bindings.join(", "))
@@ -2198,5 +2351,190 @@ fields:
 
         assert_eq!(app.project_rows.len(), 1);
         assert_eq!(app.project_rows[0].display_title, "Alpha");
+    }
+
+    #[test]
+    fn add_next_action_creates_task_linked_to_highlighted_project() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task_from_draft(&draft_with_project(
+            "Existing child",
+            "open",
+            "[[Alpha]]",
+        ))
+        .unwrap();
+
+        let mut config = config_with_projects_view();
+        config.next_action_statuses = vec!["next_action".into()];
+        let mut app = App::new(repo, config).unwrap();
+        app.activate_view_slot(8).unwrap();
+        assert_eq!(app.project_rows.len(), 1);
+        assert!(!app.project_rows[0].has_next_action);
+
+        app.begin_add_next_action();
+        assert_eq!(app.input_mode, InputMode::AddNextActionTitle);
+        app.input_value = "Call vendor".into();
+        app.submit_input().unwrap();
+
+        assert_eq!(app.input_mode, InputMode::None);
+        let created = app
+            .all_tasks
+            .iter()
+            .find(|task| task.title == "Call vendor")
+            .unwrap();
+        assert_eq!(created.status, "next_action");
+        assert_eq!(
+            created.normalized_frontmatter.get("projects"),
+            Some(&serde_json::json!(["[[Alpha]]"]))
+        );
+        assert!(app.project_rows[0].has_next_action);
+    }
+
+    #[test]
+    fn add_next_action_is_noop_without_next_action_statuses_configured() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task_from_draft(&draft_with_project("Existing child", "open", "[[Alpha]]"))
+            .unwrap();
+
+        let mut app = App::new(repo, config_with_projects_view()).unwrap();
+        app.activate_view_slot(8).unwrap();
+
+        app.begin_add_next_action();
+        assert_eq!(app.input_mode, InputMode::None);
+        assert!(app.status.contains("next_action_statuses"));
+    }
+
+    #[test]
+    fn create_flow_project_picker_links_selected_existing_project() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task_from_draft(&draft_with_project("Existing child", "open", "[[Alpha]]"))
+            .unwrap();
+
+        let mut app = App::new(repo, TuiConfig::default()).unwrap();
+        app.begin_create();
+        app.input_value = "New task".into();
+        app.submit_input().unwrap();
+        assert_eq!(app.input_mode, InputMode::CreateDetails);
+
+        app.input_value.clear();
+        app.submit_input().unwrap();
+        assert_eq!(app.input_mode, InputMode::PickCreateProject);
+        assert!(app.picker_options.contains(&"(none)".to_string()));
+        assert!(app.picker_options.contains(&"Alpha".to_string()));
+
+        app.picker_option_index = app
+            .picker_options
+            .iter()
+            .position(|option| option == "Alpha")
+            .unwrap();
+        app.submit_input().unwrap();
+        assert_eq!(app.input_mode, InputMode::PickCreateDue);
+        assert_eq!(app.draft.projects, vec!["[[Alpha]]".to_string()]);
+
+        // Fast-forward through the remaining steps with defaults.
+        app.submit_input().unwrap(); // due -> scheduled
+        app.submit_input().unwrap(); // scheduled -> priority
+        app.submit_input().unwrap(); // priority -> status
+        app.submit_input().unwrap(); // status -> recurrence
+        app.input_value.clear();
+        app.submit_input().unwrap(); // blank recurrence -> create
+
+        assert_eq!(app.input_mode, InputMode::None);
+        let created = app
+            .all_tasks
+            .iter()
+            .find(|task| task.title == "New task")
+            .unwrap();
+        assert_eq!(
+            created.normalized_frontmatter.get("projects"),
+            Some(&serde_json::json!(["[[Alpha]]"]))
+        );
+    }
+
+    #[test]
+    fn create_flow_project_picker_free_text_creates_phantom_project() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+
+        let mut app = App::new(repo, TuiConfig::default()).unwrap();
+        app.begin_create();
+        app.input_value = "New task".into();
+        app.submit_input().unwrap();
+        app.input_value.clear();
+        app.submit_input().unwrap();
+        assert_eq!(app.input_mode, InputMode::PickCreateProject);
+
+        app.switch_option_picker_to_text();
+        assert_eq!(app.input_mode, InputMode::CreateProject);
+        assert_eq!(app.input_value, "");
+
+        app.input_value = "Brand New Project".into();
+        app.submit_input().unwrap();
+        assert_eq!(app.input_mode, InputMode::PickCreateDue);
+        assert_eq!(
+            app.draft.projects,
+            vec!["[[Brand New Project]]".to_string()]
+        );
+    }
+
+    #[test]
+    fn create_flow_defaults_to_active_project_when_picker_left_unset() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        let project = repo
+            .create_task_from_draft(&TaskDraft {
+                title: "Plan release".into(),
+                details: String::new(),
+                due: None,
+                scheduled: None,
+                priority: None,
+                status: Some("open".into()),
+                recurrence: None,
+                recurrence_anchor: None,
+                projects: vec![],
+            })
+            .unwrap();
+
+        let mut app = App::new(repo, TuiConfig::default()).unwrap();
+        app.selected = app
+            .tasks
+            .iter()
+            .position(|task| task.path == project.path)
+            .unwrap();
+        app.set_selected_as_active_project().unwrap();
+
+        app.begin_create();
+        app.input_value = "Ship release".into();
+        app.submit_input().unwrap();
+        app.input_value.clear();
+        app.submit_input().unwrap();
+        assert_eq!(app.input_mode, InputMode::PickCreateProject);
+        // Leave the picker at its "(none)" default and move on.
+        app.submit_input().unwrap();
+        assert_eq!(app.input_mode, InputMode::PickCreateDue);
+
+        app.submit_input().unwrap(); // due -> scheduled
+        app.submit_input().unwrap(); // scheduled -> priority
+        app.submit_input().unwrap(); // priority -> status
+        app.submit_input().unwrap(); // status -> recurrence
+        app.input_value.clear();
+        app.submit_input().unwrap(); // blank recurrence -> create
+
+        let created = app
+            .all_tasks
+            .iter()
+            .find(|task| task.title == "Ship release")
+            .unwrap();
+        assert_eq!(
+            created.normalized_frontmatter.get("projects"),
+            Some(&serde_json::json!(["[[Plan release]]"]))
+        );
     }
 }

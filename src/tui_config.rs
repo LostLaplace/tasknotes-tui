@@ -96,6 +96,7 @@ pub enum KeyCommand {
     FocusToday,
     EnterProject,
     LeaveProject,
+    AddNextAction,
 }
 
 impl KeyCommand {
@@ -134,6 +135,7 @@ impl KeyCommand {
             "focus_today" => KeyCommand::FocusToday,
             "enter_project" => KeyCommand::EnterProject,
             "leave_project" => KeyCommand::LeaveProject,
+            "add_next_action" => KeyCommand::AddNextAction,
             _ => return None,
         })
     }
@@ -170,6 +172,7 @@ impl KeyCommand {
             KeyCommand::FocusToday => "focus_today".to_string(),
             KeyCommand::EnterProject => "enter_project".to_string(),
             KeyCommand::LeaveProject => "leave_project".to_string(),
+            KeyCommand::AddNextAction => "add_next_action".to_string(),
         }
     }
 }
@@ -330,6 +333,7 @@ pub fn default_keybinds() -> BTreeMap<String, KeyCommand> {
         ("g".into(), KeyCommand::FocusToday),
         ("enter".into(), KeyCommand::EnterProject),
         ("esc".into(), KeyCommand::LeaveProject),
+        ("shift-n".into(), KeyCommand::AddNextAction),
     ])
 }
 

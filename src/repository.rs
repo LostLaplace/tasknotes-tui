@@ -1056,6 +1056,12 @@ pub struct ProjectSummary {
     pub earliest_due: Option<String>,
     pub earliest_scheduled: Option<String>,
     pub task_paths: Vec<String>,
+    /// The exact `projects:` link text (e.g. `[[Foo]]`) that at least one task already
+    /// uses to reference this project. Reusing this verbatim when linking a *new* task
+    /// to the project sidesteps re-deriving a canonical wikilink form (which would need
+    /// ambiguity handling for resolved projects) — whatever already works for an
+    /// existing task works here too, resolved or phantom.
+    pub link_text: String,
 }
 
 /// Canonical identity for a project link: `path:<resolved path>` when the link resolves
@@ -1156,6 +1162,7 @@ pub fn build_project_summaries(
                     earliest_due: None,
                     earliest_scheduled: None,
                     task_paths: Vec::new(),
+                    link_text: raw.trim().to_string(),
                 }
             });
             row.total_count += 1;
@@ -1578,6 +1585,7 @@ fields:
         assert_eq!(rows[0].resolved_path.as_deref(), Some(project.path.as_str()));
         assert_eq!(rows[0].total_count, 2);
         assert_eq!(rows[0].open_count, 1);
+        assert_eq!(rows[0].link_text, "[[Project Alpha]]");
     }
 
     #[test]
@@ -1608,6 +1616,7 @@ fields:
         assert!(rows[0].key.starts_with("label:"));
         assert_eq!(rows[0].total_count, 1);
         assert_eq!(rows[0].open_count, 1);
+        assert_eq!(rows[0].link_text, "[[Ghost Project]]");
     }
 
     #[test]

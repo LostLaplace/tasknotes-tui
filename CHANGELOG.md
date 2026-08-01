@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.8 - 2026-08-01
+
+- add `Shift-N` in the Projects view to quick-create a task linked to the highlighted project, with status pre-set to the first configured `next_action_statuses` value
+- add a project picker step to the multi-step "New Task" flow (`n`), listing existing projects with a `(none)` option and free-text entry for a new (phantom) project; falls back to the active project when left on `(none)`, matching quick create's existing behavior
+
 ## v0.1.7 - 2026-08-01
 
 - add an opt-in Projects view (`kind: "projects"`) that lists every distinct project referenced by tasks' `projects:` links, including projects with no backing note, with open/total task counts and an earliest due/scheduled date

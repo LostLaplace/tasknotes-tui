@@ -132,6 +132,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             KeyCommand::SetActiveProject => app.set_selected_as_active_project()?,
             KeyCommand::EnterProject => app.enter_selected_project(),
             KeyCommand::LeaveProject => app.exit_project_drilldown(),
+            KeyCommand::AddNextAction => app.begin_add_next_action(),
         }
     }
     Ok(false)
