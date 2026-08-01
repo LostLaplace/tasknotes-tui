@@ -15,6 +15,11 @@ pub struct TuiConfig {
     pub views: BTreeMap<u8, ViewConfig>,
     #[serde(default)]
     pub urgency: UrgencyConfig,
+    /// Status values (e.g. `next_action`) that count as a project's "next action" for
+    /// the Projects view. Empty by default, since this is vault-specific vocabulary —
+    /// with no values configured, the next-action indicator simply never renders.
+    #[serde(default)]
+    pub next_action_statuses: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +55,11 @@ pub enum ViewFilter {
         #[serde(alias = "expression", alias = "where")]
         value: String,
     },
+    /// Lists distinct projects (from every task's `projects:` links, resolved or not)
+    /// as summary rows instead of filtering individual tasks. Handled specially by
+    /// `App::apply_filters` rather than through the per-task `CompiledViewFilter`
+    /// matching path used by every other variant.
+    Projects,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -84,6 +94,8 @@ pub enum KeyCommand {
     FocusPrevWeek,
     FocusNextWeek,
     FocusToday,
+    EnterProject,
+    LeaveProject,
 }
 
 impl KeyCommand {
@@ -120,6 +132,8 @@ impl KeyCommand {
             "focus_prev_week" => KeyCommand::FocusPrevWeek,
             "focus_next_week" => KeyCommand::FocusNextWeek,
             "focus_today" => KeyCommand::FocusToday,
+            "enter_project" => KeyCommand::EnterProject,
+            "leave_project" => KeyCommand::LeaveProject,
             _ => return None,
         })
     }
@@ -154,6 +168,8 @@ impl KeyCommand {
             KeyCommand::FocusPrevWeek => "focus_prev_week".to_string(),
             KeyCommand::FocusNextWeek => "focus_next_week".to_string(),
             KeyCommand::FocusToday => "focus_today".to_string(),
+            KeyCommand::EnterProject => "enter_project".to_string(),
+            KeyCommand::LeaveProject => "leave_project".to_string(),
         }
     }
 }
@@ -184,6 +200,7 @@ impl Default for TuiConfig {
             keybinds: default_keybinds(),
             views: default_views(),
             urgency: UrgencyConfig::default(),
+            next_action_statuses: Vec::new(),
         }
     }
 }
@@ -311,6 +328,8 @@ pub fn default_keybinds() -> BTreeMap<String, KeyCommand> {
         ("pageup".into(), KeyCommand::FocusPrevWeek),
         ("pagedown".into(), KeyCommand::FocusNextWeek),
         ("g".into(), KeyCommand::FocusToday),
+        ("enter".into(), KeyCommand::EnterProject),
+        ("esc".into(), KeyCommand::LeaveProject),
     ])
 }
 

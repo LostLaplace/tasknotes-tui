@@ -1041,6 +1041,162 @@ pub fn project_links(task: &TaskRecord) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// A distinct project, aggregated from every task that links to it via `projects:`.
+/// Projects don't need a backing note to exist here: a wikilink with no matching file
+/// (a "phantom" project) still gets a row, keyed by its normalized link text instead
+/// of a resolved path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectSummary {
+    pub key: String,
+    pub display_title: String,
+    pub resolved_path: Option<String>,
+    pub open_count: usize,
+    pub total_count: usize,
+    pub has_next_action: bool,
+    pub earliest_due: Option<String>,
+    pub earliest_scheduled: Option<String>,
+    pub task_paths: Vec<String>,
+}
+
+/// Canonical identity for a project link: `path:<resolved path>` when the link resolves
+/// to a real file (so `[[Foo]]` and `[[Foo|alias]]` pointing at the same note dedupe),
+/// otherwise `label:<lowercased link text>` for phantom links.
+fn project_link_key(raw: &str, source_path: &str, all_files: &[ResolvedFileData]) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Some(resolved) = resolve_link_value(raw, source_path, all_files) {
+        return Some(format!("path:{resolved}"));
+    }
+    let (target, _format) = parse_link_target(raw)?;
+    let label = target.trim();
+    if label.is_empty() {
+        return None;
+    }
+    Some(format!("label:{}", label.to_ascii_lowercase()))
+}
+
+/// Whether `task` links to the project identified by `key` (as produced by
+/// [`project_link_key`]). Shared by [`build_project_summaries`] and the project
+/// drill-down filter so both use the exact same matching logic.
+pub fn task_matches_project(task: &TaskRecord, key: &str, all_files: &[ResolvedFileData]) -> bool {
+    project_links(task)
+        .iter()
+        .any(|raw| project_link_key(raw, &task.path, all_files).as_deref() == Some(key))
+}
+
+fn earliest_date(current: &Option<String>, candidate: Option<&str>) -> Option<String> {
+    match (current, candidate) {
+        (Some(current), Some(candidate)) => {
+            if get_date_part(candidate) < get_date_part(current) {
+                Some(candidate.to_string())
+            } else {
+                Some(current.clone())
+            }
+        }
+        (Some(current), None) => Some(current.clone()),
+        (None, Some(candidate)) => Some(candidate.to_string()),
+        (None, None) => None,
+    }
+}
+
+/// Aggregates every open, non-archived task's `projects:` links into one row per
+/// distinct project. Tasks that are archived are skipped entirely (not just excluded
+/// from the open count) so a project referenced only by archived tasks doesn't linger
+/// as a ghost row.
+pub fn build_project_summaries(
+    tasks: &[TaskRecord],
+    all_files: &[ResolvedFileData],
+    mapping: &FieldMapping,
+    archive: &ArchiveConfig,
+    next_action_statuses: &[String],
+) -> Vec<ProjectSummary> {
+    let mut rows: std::collections::BTreeMap<String, ProjectSummary> =
+        std::collections::BTreeMap::new();
+
+    for task in tasks {
+        if is_archived_task(task, archive) {
+            continue;
+        }
+        let is_open = !is_completed_status(mapping, Some(&task.status));
+        let is_next_action = next_action_statuses.iter().any(|status| status == &task.status);
+
+        let mut seen_keys: Vec<String> = Vec::new();
+        let mut links: Vec<(String, String)> = Vec::new();
+        for raw in project_links(task) {
+            let Some(key) = project_link_key(&raw, &task.path, all_files) else {
+                continue;
+            };
+            if seen_keys.contains(&key) {
+                continue;
+            }
+            seen_keys.push(key.clone());
+            links.push((key, raw));
+        }
+
+        for (key, raw) in links {
+            let row = rows.entry(key.clone()).or_insert_with(|| {
+                let resolved_path = key.strip_prefix("path:").map(str::to_string);
+                let display_title = resolved_path
+                    .as_deref()
+                    .map(|path| project_display_title(path, tasks, all_files))
+                    .or_else(|| {
+                        parse_link_target(raw.trim())
+                            .map(|(target, _)| target.trim().to_string())
+                    })
+                    .unwrap_or_else(|| key.clone());
+                ProjectSummary {
+                    key: key.clone(),
+                    display_title,
+                    resolved_path,
+                    open_count: 0,
+                    total_count: 0,
+                    has_next_action: false,
+                    earliest_due: None,
+                    earliest_scheduled: None,
+                    task_paths: Vec::new(),
+                }
+            });
+            row.total_count += 1;
+            if is_open {
+                row.open_count += 1;
+            }
+            if is_open && is_next_action {
+                row.has_next_action = true;
+            }
+            if is_open {
+                row.earliest_due = earliest_date(&row.earliest_due, task.due.as_deref());
+                row.earliest_scheduled =
+                    earliest_date(&row.earliest_scheduled, task.scheduled.as_deref());
+            }
+            row.task_paths.push(task.path.clone());
+        }
+    }
+
+    let mut result: Vec<ProjectSummary> = rows.into_values().collect();
+    result.sort_by(|a, b| a.display_title.to_lowercase().cmp(&b.display_title.to_lowercase()));
+    result
+}
+
+fn project_display_title(path: &str, tasks: &[TaskRecord], all_files: &[ResolvedFileData]) -> String {
+    if let Some(task) = tasks.iter().find(|task| task.path == path) {
+        return task.title.clone();
+    }
+    if let Some(file) = all_files.iter().find(|file| file.path == path) {
+        if let Some(title) = file.frontmatter.get("title").and_then(Value::as_str) {
+            if !title.trim().is_empty() {
+                return title.trim().to_string();
+            }
+        }
+    }
+    Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(path)
+        .to_string()
+}
+
 fn read_link_values(value: &Value) -> Vec<String> {
     match value {
         Value::Array(values) => values
@@ -1360,6 +1516,230 @@ fields:
             repo.canonical_project_link_for_task(&project).unwrap(),
             "[[Project Alpha]]"
         );
+    }
+
+    fn draft_with_project(title: &str, status: &str, project: &str) -> TaskDraft {
+        TaskDraft {
+            title: title.into(),
+            details: String::new(),
+            due: None,
+            scheduled: None,
+            priority: None,
+            status: Some(status.into()),
+            recurrence: None,
+            recurrence_anchor: None,
+            projects: vec![project.into()],
+        }
+    }
+
+    #[test]
+    fn build_project_summaries_aggregates_resolved_project_open_and_done_counts() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        let project = repo
+            .create_task_from_draft(&TaskDraft {
+                title: "Project Alpha".into(),
+                details: String::new(),
+                due: None,
+                scheduled: None,
+                priority: None,
+                status: Some("open".into()),
+                recurrence: None,
+                recurrence_anchor: None,
+                projects: vec![],
+            })
+            .unwrap();
+        repo.create_task_from_draft(&draft_with_project(
+            "Child open",
+            "open",
+            "[[Project Alpha]]",
+        ))
+        .unwrap();
+        repo.create_task_from_draft(&draft_with_project(
+            "Child done",
+            "done",
+            "[[Project Alpha]]",
+        ))
+        .unwrap();
+
+        let tasks = repo.list_tasks(TaskFilter::All, &today_local()).unwrap();
+        let all_files = repo.build_view_eval_support().unwrap().all_files;
+        let rows = build_project_summaries(
+            &tasks,
+            &all_files,
+            &repo.field_mapping,
+            &repo.config.archive,
+            &[],
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].display_title, "Project Alpha");
+        assert_eq!(rows[0].resolved_path.as_deref(), Some(project.path.as_str()));
+        assert_eq!(rows[0].total_count, 2);
+        assert_eq!(rows[0].open_count, 1);
+    }
+
+    #[test]
+    fn build_project_summaries_includes_phantom_projects_as_plain_rows() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task_from_draft(&draft_with_project(
+            "Read chapter 1",
+            "open",
+            "[[Ghost Project]]",
+        ))
+        .unwrap();
+
+        let tasks = repo.list_tasks(TaskFilter::All, &today_local()).unwrap();
+        let all_files = repo.build_view_eval_support().unwrap().all_files;
+        let rows = build_project_summaries(
+            &tasks,
+            &all_files,
+            &repo.field_mapping,
+            &repo.config.archive,
+            &[],
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].display_title, "Ghost Project");
+        assert_eq!(rows[0].resolved_path, None);
+        assert!(rows[0].key.starts_with("label:"));
+        assert_eq!(rows[0].total_count, 1);
+        assert_eq!(rows[0].open_count, 1);
+    }
+
+    #[test]
+    fn build_project_summaries_dedupes_plain_and_aliased_links_to_same_project() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task_from_draft(&TaskDraft {
+            title: "Project Alpha".into(),
+            details: String::new(),
+            due: None,
+            scheduled: None,
+            priority: None,
+            status: Some("open".into()),
+            recurrence: None,
+            recurrence_anchor: None,
+            projects: vec![],
+        })
+        .unwrap();
+        repo.create_task_from_draft(&draft_with_project(
+            "Child A",
+            "open",
+            "[[Project Alpha]]",
+        ))
+        .unwrap();
+        repo.create_task_from_draft(&draft_with_project(
+            "Child B",
+            "open",
+            "[[Project Alpha|Alpha]]",
+        ))
+        .unwrap();
+
+        let tasks = repo.list_tasks(TaskFilter::All, &today_local()).unwrap();
+        let all_files = repo.build_view_eval_support().unwrap().all_files;
+        let rows = build_project_summaries(
+            &tasks,
+            &all_files,
+            &repo.field_mapping,
+            &repo.config.archive,
+            &[],
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].total_count, 2);
+    }
+
+    #[test]
+    fn build_project_summaries_reports_zero_open_task_project() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task_from_draft(&draft_with_project(
+            "Finished thing",
+            "done",
+            "[[Someday Project]]",
+        ))
+        .unwrap();
+
+        let tasks = repo.list_tasks(TaskFilter::All, &today_local()).unwrap();
+        let all_files = repo.build_view_eval_support().unwrap().all_files;
+        let rows = build_project_summaries(
+            &tasks,
+            &all_files,
+            &repo.field_mapping,
+            &repo.config.archive,
+            &[],
+        );
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].open_count, 0);
+        assert_eq!(rows[0].total_count, 1);
+    }
+
+    #[test]
+    fn build_project_summaries_has_next_action_only_when_configured_status_matches() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task_from_draft(&draft_with_project(
+            "Next thing",
+            "next_action",
+            "[[Some Project]]",
+        ))
+        .unwrap();
+
+        let tasks = repo.list_tasks(TaskFilter::All, &today_local()).unwrap();
+        let all_files = repo.build_view_eval_support().unwrap().all_files;
+
+        let without_config = build_project_summaries(
+            &tasks,
+            &all_files,
+            &repo.field_mapping,
+            &repo.config.archive,
+            &[],
+        );
+        assert!(!without_config[0].has_next_action);
+
+        let with_config = build_project_summaries(
+            &tasks,
+            &all_files,
+            &repo.field_mapping,
+            &repo.config.archive,
+            &["next_action".to_string()],
+        );
+        assert!(with_config[0].has_next_action);
+    }
+
+    #[test]
+    fn build_project_summaries_excludes_archived_tasks() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task_from_draft(&draft_with_project(
+            "Archived child",
+            "open",
+            "[[Archived Project]]",
+        ))
+        .unwrap();
+        let all = repo.list_tasks(TaskFilter::All, &today_local()).unwrap();
+        repo.toggle_archive(&all[0]).unwrap();
+
+        let tasks = repo.list_tasks(TaskFilter::All, &today_local()).unwrap();
+        let all_files = repo.build_view_eval_support().unwrap().all_files;
+        let rows = build_project_summaries(
+            &tasks,
+            &all_files,
+            &repo.field_mapping,
+            &repo.config.archive,
+            &[],
+        );
+
+        assert!(rows.is_empty());
     }
 
     #[test]

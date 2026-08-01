@@ -113,6 +113,23 @@ The active project is shown in the State pane. When an active project is set:
 - the default Project view (`7`) shows tasks whose `projects` links resolve to the active project
 - switching views does not clear the active project
 
+### Projects view
+
+An opt-in view kind (`kind: "projects"`, see Configuration below) that lists every distinct
+project referenced by a task's `projects:` field, instead of filtering individual tasks. Each row
+shows open/total task counts, an earliest-due/scheduled date, and (if configured) a next-action
+indicator. Projects don't need their own note to show up here — a wikilink with no matching file
+still gets a row, dimmed and marked `(no note)`, since not every GTD project needs a dedicated
+page.
+
+- `Enter` — drill into the selected project's tasks (the normal task list, fully interactive)
+- `Esc` — back out to the project summary list
+- `/` search filters project rows by title while the list is showing
+
+This is unrelated to the `Shift-P` active-project mechanism above — it doesn't use or change the
+active project, and works the same way for projects with a backing note and projects that only
+exist as a wikilink.
+
 ## Configuration
 
 ### Views
@@ -122,6 +139,14 @@ Views are configured in `tasknotes-tui.yaml` under the `views` key. Built-in vie
 - `all`, `open`, `date`, `overdue`, `tracked`, `archived`
 - `status` — filter by a status value
 - `expression` — filter using mdbase expression syntax
+- `projects` — lists distinct projects instead of tasks; see "Projects view" above
+
+```yaml
+views:
+  8:
+    label: "Projects"
+    kind: "projects"
+```
 
 Expression views have access to task fields (`status`, `priority`, `due`, `scheduled`, etc.) and special variables (`focusDate`, `today`, `isCompleted`, `isTracked`, `isArchived`, `path`).
 
@@ -186,6 +211,19 @@ custom sorted/filtered views without touching `sort:`, e.g. `where: "urgency > 8
 
 Taskwarrior's dependency-based urgency (`blocked`/`blocking`/`waiting`) isn't supported — this
 codebase has no dependency/blocking data model yet.
+
+`sort:` has no effect on `kind: "projects"` views — project rows are always sorted by title.
+
+### Next actions in the Projects view
+
+The Projects view's next-action indicator is opt-in and vault-specific: it lights up for a
+project when one of its open tasks has a status listed in `next_action_statuses` (top-level
+config key, empty by default so the indicator is off until configured):
+
+```yaml
+next_action_statuses:
+  - next_action
+```
 
 ### Keybinds
 

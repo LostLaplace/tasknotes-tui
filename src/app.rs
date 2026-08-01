@@ -2,7 +2,10 @@ use anyhow::Result;
 use std::collections::BTreeMap;
 
 use crate::date::{apply_day_offset, apply_month_offset, get_date_part, today_local};
-use crate::repository::{TaskDraft, TaskFilter, TaskRecord, TaskRepository};
+use crate::repository::{
+    build_project_summaries, task_matches_project, ProjectSummary, TaskDraft, TaskFilter,
+    TaskRecord, TaskRepository,
+};
 use crate::tui_config::{KeyCommand, TuiConfig, ViewConfig, ViewFilter, ViewSort};
 use crate::urgency::compute_urgency;
 use crate::view_query::{compile_view_filters, CompiledViewFilter, ViewEvalSupport};
@@ -45,6 +48,16 @@ pub struct ActiveProject {
     pub title: String,
 }
 
+/// Which project the Projects view is currently drilled into, if any. Deliberately
+/// separate from `ActiveProject`: that mechanism is resolved-path-only (via view slot
+/// 7's expression filter) and can't represent a phantom project, whereas this key
+/// matches the same way `ProjectSummary::key` does, resolved or not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectDrilldown {
+    pub key: String,
+    pub display_title: String,
+}
+
 pub struct App {
     pub repo: TaskRepository,
     pub tui_config: TuiConfig,
@@ -68,6 +81,9 @@ pub struct App {
     pub picker_option_index: usize,
     pub pending_open_editor: bool,
     pub active_project: Option<ActiveProject>,
+    pub project_rows: Vec<ProjectSummary>,
+    pub project_selected: usize,
+    pub project_drilldown: Option<ProjectDrilldown>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +108,8 @@ pub enum PaletteCommand {
     EditRecurrenceAnchor,
     SetActiveProject,
     ClearActiveProject,
+    EnterProject,
+    LeaveProject,
 }
 
 pub struct PaletteItem {
@@ -134,6 +152,20 @@ fn static_palette_items() -> Vec<PaletteItem> {
             title: "Clear active project".into(),
             aliases: vec!["clear project".into(), "unset project".into()],
             description: "Clear the current active project context".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::EnterProject,
+            title: "Open project".into(),
+            aliases: vec!["drill in".into(), "enter".into()],
+            description: "Show the selected project's tasks (Projects view)".into(),
+            hotkey: None,
+        },
+        PaletteItem {
+            command: PaletteCommand::LeaveProject,
+            title: "Back to projects".into(),
+            aliases: vec!["leave project".into(), "esc".into()],
+            description: "Return to the project summary list (Projects view)".into(),
             hotkey: None,
         },
         PaletteItem {
@@ -270,6 +302,9 @@ impl App {
             picker_option_index: 0,
             pending_open_editor: false,
             active_project: None,
+            project_rows: Vec::new(),
+            project_selected: 0,
+            project_drilldown: None,
         };
         app.reload_from_disk()?;
         Ok(app)
@@ -289,6 +324,10 @@ impl App {
     }
 
     fn apply_filters(&mut self) {
+        if self.is_projects_view() {
+            self.apply_project_filters();
+            return;
+        }
         self.tasks = self
             .all_tasks
             .iter()
@@ -348,7 +387,110 @@ impl App {
         self.tasks.get(self.selected)
     }
 
+    /// Whether the current view slot is configured as `kind: projects`.
+    pub fn is_projects_view(&self) -> bool {
+        matches!(
+            self.current_view().map(|view| &view.filter),
+            Some(ViewFilter::Projects)
+        )
+    }
+
+    /// Whether the Projects view is showing the project summary list (as opposed to
+    /// being drilled into one project's tasks).
+    pub fn is_showing_project_list(&self) -> bool {
+        self.is_projects_view() && self.project_drilldown.is_none()
+    }
+
+    pub fn selected_project_row(&self) -> Option<&ProjectSummary> {
+        self.project_rows.get(self.project_selected)
+    }
+
+    fn matches_project_search(&self, row: &ProjectSummary) -> bool {
+        let needle = self.search_query.trim().to_ascii_lowercase();
+        if needle.is_empty() {
+            return true;
+        }
+        row.display_title.to_ascii_lowercase().contains(&needle)
+    }
+
+    fn apply_project_filters(&mut self) {
+        self.tasks.clear();
+        let Some(support) = self.view_eval_support.clone() else {
+            self.project_rows.clear();
+            self.status = "Projects unavailable: still loading".to_string();
+            return;
+        };
+        if let Some(drilldown) = self.project_drilldown.clone() {
+            self.project_rows.clear();
+            self.tasks = self
+                .all_tasks
+                .iter()
+                .filter(|task| task_matches_project(task, &drilldown.key, &support.all_files))
+                .filter(|task| self.matches_search(task))
+                .cloned()
+                .collect();
+            if self.selected >= self.tasks.len() && !self.tasks.is_empty() {
+                self.selected = self.tasks.len() - 1;
+            } else if self.tasks.is_empty() {
+                self.selected = 0;
+            }
+            self.status = format!("{} tasks in {}", self.tasks.len(), drilldown.display_title);
+        } else {
+            self.project_rows = build_project_summaries(
+                &self.all_tasks,
+                &support.all_files,
+                &self.repo.field_mapping,
+                &self.repo.config.archive,
+                &self.tui_config.next_action_statuses,
+            )
+            .into_iter()
+            .filter(|row| self.matches_project_search(row))
+            .collect();
+            if self.project_selected >= self.project_rows.len() && !self.project_rows.is_empty() {
+                self.project_selected = self.project_rows.len() - 1;
+            } else if self.project_rows.is_empty() {
+                self.project_selected = 0;
+            }
+            self.status = format!("{} projects", self.project_rows.len());
+        }
+    }
+
+    /// Drills into the currently selected project row's tasks. No-op unless the
+    /// Projects view is showing the summary list.
+    pub fn enter_selected_project(&mut self) {
+        if !self.is_showing_project_list() {
+            return;
+        }
+        let Some(row) = self.selected_project_row() else {
+            return;
+        };
+        self.project_drilldown = Some(ProjectDrilldown {
+            key: row.key.clone(),
+            display_title: row.display_title.clone(),
+        });
+        self.selected = 0;
+        self.apply_filters();
+    }
+
+    /// Backs out of a project drilldown to the summary list. No-op unless currently
+    /// drilled in. Leaves `project_selected` untouched so the list cursor position
+    /// survives the round trip.
+    pub fn exit_project_drilldown(&mut self) {
+        if self.project_drilldown.is_none() {
+            return;
+        }
+        self.project_drilldown = None;
+        self.apply_filters();
+    }
+
     pub fn next(&mut self) {
+        if self.is_showing_project_list() {
+            if self.project_rows.is_empty() {
+                return;
+            }
+            self.project_selected = (self.project_selected + 1).min(self.project_rows.len() - 1);
+            return;
+        }
         if self.tasks.is_empty() {
             return;
         }
@@ -356,6 +498,12 @@ impl App {
     }
 
     pub fn previous(&mut self) {
+        if self.is_showing_project_list() {
+            if self.project_selected > 0 {
+                self.project_selected -= 1;
+            }
+            return;
+        }
         if self.selected > 0 {
             self.selected -= 1;
         }
@@ -364,6 +512,9 @@ impl App {
     pub fn activate_view_slot(&mut self, slot: u8) -> Result<()> {
         if self.tui_config.views.contains_key(&slot) {
             self.current_view_slot = slot;
+            if !self.is_projects_view() {
+                self.project_drilldown = None;
+            }
             self.refresh()?;
             if let Some(error) = self.current_view_error() {
                 self.status = format!("View {} invalid: {}", slot, error);
@@ -1033,6 +1184,14 @@ impl App {
         if let Some((step, total, label)) = self.create_progress() {
             return format!("Create {step}/{total}: {label}");
         }
+        if self.input_mode == InputMode::None {
+            if self.is_showing_project_list() {
+                return "Projects".to_string();
+            }
+            if let Some(drilldown) = self.project_drilldown.as_ref() {
+                return format!("Project: {}", drilldown.display_title);
+            }
+        }
         match self.input_mode {
             InputMode::None => "Browse".to_string(),
             InputMode::CommandPalette => "Command Palette".to_string(),
@@ -1083,6 +1242,13 @@ impl App {
     }
 
     pub fn selected_position_label(&self) -> String {
+        if self.is_showing_project_list() {
+            return if self.project_rows.is_empty() {
+                "0/0".to_string()
+            } else {
+                format!("{}/{}", self.project_selected + 1, self.project_rows.len())
+            };
+        }
         if self.tasks.is_empty() {
             "0/0".to_string()
         } else {
@@ -1116,6 +1282,40 @@ impl App {
     }
 
     pub fn contextual_shortcuts(&self) -> Vec<(String, String)> {
+        if self.input_mode == InputMode::None && self.is_showing_project_list() {
+            return vec![
+                (
+                    "Move".to_string(),
+                    self.binding_label(KeyCommand::NextTask, "j/k"),
+                ),
+                ("Views".to_string(), "1-9 switch".to_string()),
+                (
+                    "Open".to_string(),
+                    self.binding_label(KeyCommand::EnterProject, "enter"),
+                ),
+            ];
+        }
+        if self.input_mode == InputMode::None && self.project_drilldown.is_some() {
+            return vec![
+                (
+                    "Move".to_string(),
+                    self.binding_label(KeyCommand::NextTask, "j/k"),
+                ),
+                (
+                    "Back".to_string(),
+                    self.binding_label(KeyCommand::LeaveProject, "esc"),
+                ),
+                (
+                    "Actions".to_string(),
+                    format!(
+                        "{} complete, {} archive, {} palette",
+                        self.binding_label(KeyCommand::ToggleComplete, "x"),
+                        self.binding_label(KeyCommand::ToggleArchive, "z"),
+                        self.binding_label(KeyCommand::CommandPalette, "ctrl-p"),
+                    ),
+                ),
+            ];
+        }
         match self.input_mode {
             InputMode::None => vec![
                 (
@@ -1303,6 +1503,8 @@ impl App {
             PaletteCommand::EditRecurrenceAnchor => self.begin_edit_recurrence_anchor(),
             PaletteCommand::SetActiveProject => self.set_selected_as_active_project()?,
             PaletteCommand::ClearActiveProject => self.clear_active_project(),
+            PaletteCommand::EnterProject => self.enter_selected_project(),
+            PaletteCommand::LeaveProject => self.exit_project_drilldown(),
         }
         Ok(())
     }
@@ -1465,6 +1667,8 @@ impl App {
             PaletteCommand::EditRecurrenceAnchor => KeyCommand::EditRecurrenceAnchor,
             PaletteCommand::SetActiveProject => KeyCommand::SetActiveProject,
             PaletteCommand::ClearActiveProject => return None,
+            PaletteCommand::EnterProject => KeyCommand::EnterProject,
+            PaletteCommand::LeaveProject => KeyCommand::LeaveProject,
         };
         let bindings = self.tui_config.bindings_for_command(key_command);
         (!bindings.is_empty()).then(|| bindings.join(", "))
@@ -1529,6 +1733,7 @@ fn view_filter_name(filter: &ViewFilter) -> &str {
         ViewFilter::Archived => "archived",
         ViewFilter::Status { .. } => "status",
         ViewFilter::Expression { .. } => "expression",
+        ViewFilter::Projects => "projects",
     }
 }
 
@@ -1852,5 +2057,146 @@ fields:
             .find(|t| t.path == task.path)
             .unwrap();
         assert_eq!(updated.priority.as_deref(), Some("high"));
+    }
+
+    fn draft_with_project(title: &str, status: &str, project: &str) -> TaskDraft {
+        TaskDraft {
+            title: title.into(),
+            details: String::new(),
+            due: None,
+            scheduled: None,
+            priority: None,
+            status: Some(status.into()),
+            recurrence: None,
+            recurrence_anchor: None,
+            projects: vec![project.into()],
+        }
+    }
+
+    fn config_with_projects_view() -> TuiConfig {
+        let mut config = TuiConfig::default();
+        config.views.insert(
+            8,
+            ViewConfig {
+                label: "Projects".into(),
+                filter: ViewFilter::Projects,
+                sort: ViewSort::Date,
+            },
+        );
+        config
+    }
+
+    #[test]
+    fn projects_view_lists_rows_and_drilldown_shows_only_linked_tasks() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task_from_draft(&TaskDraft {
+            title: "Project Alpha".into(),
+            details: String::new(),
+            due: None,
+            scheduled: None,
+            priority: None,
+            status: Some("open".into()),
+            recurrence: None,
+            recurrence_anchor: None,
+            projects: vec![],
+        })
+        .unwrap();
+        repo.create_task_from_draft(&TaskDraft {
+            title: "Child of Alpha".into(),
+            details: String::new(),
+            due: None,
+            scheduled: None,
+            priority: None,
+            status: Some("open".into()),
+            recurrence: None,
+            recurrence_anchor: None,
+            projects: vec!["[[Project Alpha]]".into()],
+        })
+        .unwrap();
+        repo.create_task_from_draft(&TaskDraft {
+            title: "Unrelated task".into(),
+            details: String::new(),
+            due: None,
+            scheduled: None,
+            priority: None,
+            status: Some("open".into()),
+            recurrence: None,
+            recurrence_anchor: None,
+            projects: vec![],
+        })
+        .unwrap();
+
+        let mut app = App::new(repo, config_with_projects_view()).unwrap();
+        app.activate_view_slot(8).unwrap();
+        assert!(app.is_showing_project_list());
+        assert_eq!(app.tasks.len(), 0);
+        assert_eq!(app.project_rows.len(), 1);
+        assert_eq!(app.project_rows[0].display_title, "Project Alpha");
+
+        app.enter_selected_project();
+        assert!(!app.is_showing_project_list());
+        assert_eq!(app.tasks.len(), 1);
+        assert_eq!(app.tasks[0].title, "Child of Alpha");
+
+        app.exit_project_drilldown();
+        assert!(app.is_showing_project_list());
+        assert_eq!(app.project_rows.len(), 1);
+    }
+
+    #[test]
+    fn projects_view_next_previous_move_project_selection_not_task_selection() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task_from_draft(&draft_with_project(
+            "Child A",
+            "open",
+            "[[Alpha]]",
+        ))
+        .unwrap();
+        repo.create_task_from_draft(&draft_with_project(
+            "Child B",
+            "open",
+            "[[Beta]]",
+        ))
+        .unwrap();
+
+        let mut app = App::new(repo, config_with_projects_view()).unwrap();
+        app.activate_view_slot(8).unwrap();
+        assert_eq!(app.project_rows.len(), 2);
+
+        app.next();
+        assert_eq!(app.project_selected, 1);
+        app.previous();
+        assert_eq!(app.project_selected, 0);
+    }
+
+    #[test]
+    fn projects_view_search_filters_rows_by_title() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task_from_draft(&draft_with_project(
+            "Child A",
+            "open",
+            "[[Alpha]]",
+        ))
+        .unwrap();
+        repo.create_task_from_draft(&draft_with_project(
+            "Child B",
+            "open",
+            "[[Beta]]",
+        ))
+        .unwrap();
+
+        let mut app = App::new(repo, config_with_projects_view()).unwrap();
+        app.activate_view_slot(8).unwrap();
+        app.search_query = "alpha".into();
+        app.refresh().unwrap();
+
+        assert_eq!(app.project_rows.len(), 1);
+        assert_eq!(app.project_rows[0].display_title, "Alpha");
     }
 }

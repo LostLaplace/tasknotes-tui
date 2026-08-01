@@ -130,6 +130,8 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             KeyCommand::EditRecurrence => app.begin_edit_recurrence(),
             KeyCommand::EditRecurrenceAnchor => app.begin_edit_recurrence_anchor(),
             KeyCommand::SetActiveProject => app.set_selected_as_active_project()?,
+            KeyCommand::EnterProject => app.enter_selected_project(),
+            KeyCommand::LeaveProject => app.exit_project_drilldown(),
         }
     }
     Ok(false)
@@ -177,11 +179,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         Line::from(vec![
             Span::styled(
                 format!(
-                    "View {}: {}",
+                    "View {}: {}{}",
                     app.current_view_slot,
                     app.current_view()
                         .map(|view| view.label.as_str())
-                        .unwrap_or("Unknown")
+                        .unwrap_or("Unknown"),
+                    app.project_drilldown
+                        .as_ref()
+                        .map(|drilldown| format!(" → {}", drilldown.display_title))
+                        .unwrap_or_default(),
                 ),
                 Style::default().fg(Color::Cyan),
             ),
@@ -236,57 +242,91 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) {
         support[0],
     );
 
-    let items: Vec<ListItem> = app
-        .tasks
-        .iter()
-        .enumerate()
-        .map(|(index, task)| {
-            let is_archived = is_archived_task(task, &app.repo.config.archive);
-            let is_selected = index == app.selected;
-            let title_style = if is_archived {
+    if app.is_showing_project_list() {
+        let items: Vec<ListItem> = app.project_rows.iter().map(project_row_line).collect();
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .title(format!("Projects ({})", app.project_rows.len()))
+                    .borders(Borders::ALL),
+            )
+            .scroll_padding(2)
+            .highlight_style(
                 Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM)
-            } else {
-                Style::default()
-            };
-            let mut primary = vec![Span::styled(task.title.clone(), title_style)];
-            let inline_meta = compact_task_meta(task, is_archived);
-            if !inline_meta.is_empty() {
-                primary.push(Span::raw("  "));
-                primary.extend(inline_meta);
-            }
-
-            let mut lines = vec![Line::from(primary)];
-            if is_selected {
-                let urgency = compute_urgency(task, &today_local(), &app.tui_config.urgency);
-                let secondary = selected_task_meta(task, is_archived, urgency);
-                if !secondary.is_empty() {
-                    lines.push(Line::from(secondary));
+                    .bg(Color::Rgb(28, 48, 74))
+                    .add_modifier(Modifier::BOLD),
+            );
+        let mut state = ListState::default();
+        if !app.project_rows.is_empty() {
+            state.select(Some(app.project_selected));
+        }
+        frame.render_stateful_widget(list, body[0], &mut state);
+    } else {
+        let items: Vec<ListItem> = app
+            .tasks
+            .iter()
+            .enumerate()
+            .map(|(index, task)| {
+                let is_archived = is_archived_task(task, &app.repo.config.archive);
+                let is_selected = index == app.selected;
+                let title_style = if is_archived {
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM)
+                } else {
+                    Style::default()
+                };
+                let mut primary = vec![Span::styled(task.title.clone(), title_style)];
+                let inline_meta = compact_task_meta(task, is_archived);
+                if !inline_meta.is_empty() {
+                    primary.push(Span::raw("  "));
+                    primary.extend(inline_meta);
                 }
-            }
-            ListItem::new(lines)
-        })
-        .collect();
-    let list = List::new(items)
-        .block(
-            Block::default()
-                .title(format!("Tasks ({})", app.tasks.len()))
-                .borders(Borders::ALL),
-        )
-        .scroll_padding(2)
-        .highlight_style(
-            Style::default()
-                .bg(Color::Rgb(28, 48, 74))
-                .add_modifier(Modifier::BOLD),
-        );
-    let mut state = ListState::default();
-    if !app.tasks.is_empty() {
-        state.select(Some(app.selected));
-    }
-    frame.render_stateful_widget(list, body[0], &mut state);
 
-    let details = if let Some(task) = app.selected_task() {
+                let mut lines = vec![Line::from(primary)];
+                if is_selected {
+                    let urgency = compute_urgency(task, &today_local(), &app.tui_config.urgency);
+                    let secondary = selected_task_meta(task, is_archived, urgency);
+                    if !secondary.is_empty() {
+                        lines.push(Line::from(secondary));
+                    }
+                }
+                ListItem::new(lines)
+            })
+            .collect();
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .title(format!("Tasks ({})", app.tasks.len()))
+                    .borders(Borders::ALL),
+            )
+            .scroll_padding(2)
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Rgb(28, 48, 74))
+                    .add_modifier(Modifier::BOLD),
+            );
+        let mut state = ListState::default();
+        if !app.tasks.is_empty() {
+            state.select(Some(app.selected));
+        }
+        frame.render_stateful_widget(list, body[0], &mut state);
+    }
+
+    let details = if app.is_showing_project_list() {
+        if let Some(row) = app.selected_project_row() {
+            Paragraph::new(project_detail_lines(row))
+        } else {
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "No projects found",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from("Link a task's `projects:` field to a project to see it here."),
+            ])
+        }
+    } else if let Some(task) = app.selected_task() {
         let recurring = task
             .normalized_frontmatter
             .get("recurrence")
@@ -1009,6 +1049,92 @@ fn selected_task_meta(
         );
     }
     spans
+}
+
+fn project_row_line(row: &crate::repository::ProjectSummary) -> ListItem<'static> {
+    let title_style = if row.resolved_path.is_none() {
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC)
+    } else {
+        Style::default()
+    };
+    let mut primary = vec![Span::styled(row.display_title.clone(), title_style)];
+    if row.resolved_path.is_none() {
+        primary.push(Span::styled(
+            " (no note)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    primary.push(Span::raw("  "));
+    primary.push(Span::styled(
+        format!("{}/{}", row.open_count, row.total_count),
+        Style::default().fg(Color::Cyan),
+    ));
+    if row.has_next_action {
+        primary.push(Span::raw("  "));
+        primary.push(Span::styled("▶", Style::default().fg(Color::Green)));
+    }
+    if let Some(due) = row.earliest_due.as_deref() {
+        primary.push(Span::raw("  "));
+        primary.push(Span::styled(
+            format!("due {}", get_date_part(due)),
+            Style::default().fg(Color::LightRed),
+        ));
+    } else if let Some(scheduled) = row.earliest_scheduled.as_deref() {
+        primary.push(Span::raw("  "));
+        primary.push(Span::styled(
+            get_date_part(scheduled),
+            Style::default().fg(Color::Magenta),
+        ));
+    }
+    ListItem::new(Line::from(primary))
+}
+
+fn project_detail_lines(row: &crate::repository::ProjectSummary) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            row.display_title.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        detail_line(
+            "Note",
+            row.resolved_path.as_deref().unwrap_or("none (phantom)"),
+        ),
+        detail_line("Open", &format!("{}/{}", row.open_count, row.total_count)),
+        detail_line("Next action", if row.has_next_action { "yes" } else { "no" }),
+    ];
+    if let Some(due) = row.earliest_due.as_deref() {
+        lines.push(detail_line("Earliest due", &get_date_part(due)));
+    }
+    if let Some(scheduled) = row.earliest_scheduled.as_deref() {
+        lines.push(detail_line("Earliest scheduled", &get_date_part(scheduled)));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Linked tasks",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )));
+    if row.task_paths.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "None",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        for path in row.task_paths.iter().take(20) {
+            lines.push(Line::from(format!("  {path}")));
+        }
+        if row.task_paths.len() > 20 {
+            lines.push(Line::from(Span::styled(
+                format!("  … and {} more", row.task_paths.len() - 20),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+    lines
 }
 
 fn color_for_urgency(urgency: f64) -> Style {

@@ -158,6 +158,11 @@ fn matches_builtin_filter(
         ViewFilter::Archived => is_archived_task(task, archive),
         ViewFilter::Status { value } => task.status == *value,
         ViewFilter::Expression { .. } => false,
+        // Projects-kind views aggregate across all tasks into project summary rows
+        // rather than filtering individual tasks; `App::apply_filters` special-cases
+        // this filter kind before `matches` is ever called for it. This arm only
+        // exists to keep the match exhaustive.
+        ViewFilter::Projects => false,
     }
 }
 
@@ -350,6 +355,23 @@ mod tests {
         });
 
         assert!(compiled.error_message().is_some());
+        assert!(!compiled.matches(
+            &task_record(),
+            "2026-04-10",
+            &default_field_mapping(),
+            &EffectiveConfig::default().archive,
+            &ViewEvalSupport::empty(),
+            None,
+            &UrgencyConfig::default(),
+        ));
+    }
+
+    #[test]
+    fn projects_filter_never_matches_a_single_task() {
+        // Projects-kind views are aggregated by App::apply_filters, not matched
+        // per-task here. This guards the invariant in case something ever calls
+        // `matches` for this filter kind directly.
+        let compiled = CompiledViewFilter::from_filter(&ViewFilter::Projects);
         assert!(!compiled.matches(
             &task_record(),
             "2026-04-10",

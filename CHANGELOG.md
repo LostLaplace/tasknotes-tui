@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.7 - 2026-08-01
+
+- add an opt-in Projects view (`kind: "projects"`) that lists every distinct project referenced by tasks' `projects:` links, including projects with no backing note, with open/total task counts and an earliest due/scheduled date
+- add `Enter`/`Esc` drill-down navigation into and out of a project's linked tasks
+- add a configurable `next_action_statuses` next-action indicator for project rows
+
 ## v0.1.6 - 2026-08-01
 
 - stop stamping a redundant `type: task` frontmatter property on created/updated tasks (type is already identified via the task type's match rule, e.g. the `task` tag)
