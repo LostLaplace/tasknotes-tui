@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.5 - 2026-07-31
+
+- fix task creation always resolving to the same path (`task.md`) when `title.storage: filename` is set, causing every task after the first to fail with `path_conflict`
+
 ## v0.1.4 - 2026-07-27
 
 - add Taskwarrior-style urgency scoring with configurable coefficients (due proximity, scheduled date, priority, age, active time-tracking, tags, project membership)

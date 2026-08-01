@@ -477,19 +477,21 @@ impl TaskRepository {
         anyhow::ensure!(!draft.title.trim().is_empty(), "title must not be empty");
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let mut fields = Map::new();
-        // When titles are stored in the filename, don't also duplicate the title
-        // as a frontmatter property (matches how TaskNotes itself behaves, and how
-        // display title already falls back to the filename via resolve_display_title).
-        if self.config.title.storage != "filename" {
-            fields.insert(
-                self.config
-                    .mapping
-                    .get("title")
-                    .cloned()
-                    .unwrap_or_else(|| "title".into()),
-                Value::String(draft.title.trim().to_string()),
-            );
-        }
+        let title_field = self
+            .config
+            .mapping
+            .get("title")
+            .cloned()
+            .unwrap_or_else(|| "title".into());
+        // Title is always included here so path templates like `{title}.md` can
+        // render correctly, but when titles are stored in the filename, it's
+        // stripped back out below before the frontmatter is actually written
+        // (matches how TaskNotes itself behaves, and how display title already
+        // falls back to the filename via resolve_display_title).
+        fields.insert(
+            title_field.clone(),
+            Value::String(draft.title.trim().to_string()),
+        );
         fields.insert(
             self.config
                 .mapping
@@ -618,11 +620,14 @@ impl TaskRepository {
                     file_stem
                 )
             });
-        let create_fields = compat
+        let mut create_fields = compat
             .as_ref()
             .and_then(|result| result.get("frontmatter").and_then(Value::as_object))
             .cloned()
             .unwrap_or(fields);
+        if self.config.title.storage == "filename" {
+            create_fields.remove(&title_field);
+        }
         let create_body = compat
             .as_ref()
             .and_then(|result| result.get("body").and_then(Value::as_str))
@@ -1781,5 +1786,57 @@ archive:
             .list_tasks(TaskFilter::All, &today_local())
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn creating_tasks_with_filename_title_storage_derives_distinct_paths() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        fs::write(
+            tmp.path().join("tasknotes.yaml"),
+            r#"task_detection:
+  method: property
+  property_name: status
+  property_value: ""
+title:
+  storage: filename
+"#,
+        )
+        .unwrap();
+
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task_from_draft(&TaskDraft {
+            title: "First task".into(),
+            details: "".into(),
+            due: None,
+            scheduled: None,
+            priority: None,
+            status: None,
+            recurrence: None,
+            recurrence_anchor: None,
+            projects: vec![],
+        })
+        .unwrap();
+        let second = repo
+            .create_task_from_draft(&TaskDraft {
+                title: "Second task".into(),
+                details: "".into(),
+                due: None,
+                scheduled: None,
+                priority: None,
+                status: None,
+                recurrence: None,
+                recurrence_anchor: None,
+                projects: vec![],
+            })
+            .unwrap();
+
+        assert_ne!(second.path, "TaskNotes/Tasks/task.md");
+        assert!(second.path.contains("Second task") || second.path.contains("second-task"));
+
+        let tasks = repo.list_tasks(TaskFilter::All, &today_local()).unwrap();
+        assert_eq!(tasks.len(), 2);
+        let raw = fs::read_to_string(tmp.path().join(&second.path)).unwrap();
+        assert!(!raw.contains("title:"));
     }
 }
