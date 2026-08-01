@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.6 - 2026-08-01
+
+- stop stamping a redundant `type: task` frontmatter property on created/updated tasks (type is already identified via the task type's match rule, e.g. the `task` tag)
+- stop writing optional schema-default properties (e.g. `occurrence_materialization`, `occurrence_next_trigger`, `recurrence_anchor`) into tasks that never set them
+- quick create (`c`) no longer defaults new tasks to a scheduled date
+
 ## v0.1.5 - 2026-07-31
 
 - fix task creation always resolving to the same path (`task.md`) when `title.storage: filename` is set, causing every task after the first to fail with `path_conflict`

@@ -83,8 +83,15 @@ impl TaskRepository {
     }
 
     fn collection(&self) -> anyhow::Result<Collection> {
-        Collection::open(&self.root)
-            .map_err(|error| anyhow!("failed to open mdbase collection: {}", error))
+        let mut collection = Collection::open(&self.root)
+            .map_err(|error| anyhow!("failed to open mdbase collection: {}", error))?;
+        // mdbase's spec default materializes every schema-declared field
+        // default into the frontmatter on every create/update, even for
+        // fields the user never touched (e.g. recurrence/occurrence settings
+        // on a non-recurring task). TaskNotes itself only ever writes fields
+        // that are actually set, so keep writes minimal to match.
+        collection.settings.write_defaults = false;
+        Ok(collection)
     }
 
     pub fn build_view_eval_support(&self) -> anyhow::Result<ViewEvalSupport> {
@@ -473,8 +480,22 @@ impl TaskRepository {
     }
 
     pub fn create_task_from_draft(&self, draft: &TaskDraft) -> anyhow::Result<TaskRecord> {
-        let collection = self.collection()?;
+        let mut collection = self.collection()?;
         anyhow::ensure!(!draft.title.trim().is_empty(), "title must not be empty");
+        // TaskNotes identifies a note's type via its match rule (tags, in
+        // practice), never a "type"/"types" frontmatter property. When the
+        // task type declares a match rule, suppress mdbase's default
+        // explicit-type-key stamping so we don't write a redundant `type:
+        // task` property that TaskNotes-authored notes never have; types
+        // without a match rule keep the stamp since it's their only way to
+        // be recognized as this type on a later read.
+        if collection
+            .types
+            .get("task")
+            .is_some_and(|type_def| type_def.match_rules.is_some())
+        {
+            collection.settings.explicit_type_keys.clear();
+        }
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let mut fields = Map::new();
         let title_field = self
@@ -854,8 +875,14 @@ fn type_def_to_create_compat(type_def: &TypeDef) -> Value {
     let mut fields = Map::new();
     for (name, def) in &type_def.fields {
         let mut field = Map::new();
-        if let Some(default) = &def.default {
-            field.insert("default".into(), default.clone());
+        // Only forward defaults for required fields. Optional fields (e.g. the
+        // recurrence/occurrence-materialization settings) shouldn't get their
+        // default value stamped into every new task's frontmatter just because
+        // the schema happens to declare one for when the field IS set.
+        if def.required {
+            if let Some(default) = &def.default {
+                field.insert("default".into(), default.clone());
+            }
         }
         fields.insert(name.clone(), Value::Object(field));
     }
@@ -1786,6 +1813,98 @@ archive:
             .list_tasks(TaskFilter::All, &today_local())
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn creating_a_task_does_not_stamp_type_or_unset_optional_defaults() {
+        let tmp = tempdir().unwrap();
+        fs::write(
+            tmp.path().join("mdbase.yaml"),
+            r#"spec_version: "0.2.1"
+settings:
+  types_folder: "_types"
+  default_validation: "warn"
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(tmp.path().join("_types")).unwrap();
+        fs::write(
+            tmp.path().join("tasknotes.yaml"),
+            r#"task_detection:
+  method: property
+  property_name: status
+  property_value: ""
+"#,
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("_types/task.md"),
+            r#"---
+name: task
+path_pattern: "TaskNotes/Tasks/{title}.md"
+match:
+  where:
+    tags:
+      contains: "task"
+fields:
+  title:
+    type: string
+    required: true
+  status:
+    type: enum
+    required: true
+    default: inbox
+  priority:
+    type: enum
+    required: true
+    default: normal
+  recurrenceAnchor:
+    type: enum
+    default: scheduled
+  occurrenceMaterialization:
+    type: enum
+    default: manual
+  dateCreated:
+    type: datetime
+    required: true
+  dateModified:
+    type: datetime
+---
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(tmp.path().join("TaskNotes/Tasks")).unwrap();
+
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        let created = repo
+            .create_task_from_draft(&TaskDraft {
+                title: "Plain task".into(),
+                details: "".into(),
+                due: None,
+                scheduled: None,
+                priority: None,
+                status: None,
+                recurrence: None,
+                recurrence_anchor: None,
+                projects: vec![],
+            })
+            .unwrap();
+
+        let raw = fs::read_to_string(tmp.path().join(&created.path)).unwrap();
+        assert!(!raw.contains("type:"), "raw frontmatter was:\n{raw}");
+        assert!(
+            !raw.contains("recurrenceAnchor"),
+            "raw frontmatter was:\n{raw}"
+        );
+        assert!(
+            !raw.contains("occurrenceMaterialization"),
+            "raw frontmatter was:\n{raw}"
+        );
+        // Required fields are still present (with the repository's own configured
+        // defaults, since those are set explicitly before the type schema's
+        // defaults would otherwise apply).
+        assert!(raw.contains("status:"), "raw frontmatter was:\n{raw}");
+        assert!(raw.contains("priority: normal"), "raw frontmatter was:\n{raw}");
     }
 
     #[test]

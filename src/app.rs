@@ -531,12 +531,9 @@ impl App {
         self.input_mode = InputMode::QuickCreateTitle;
         self.input_value.clear();
         self.status = if let Some(project) = self.active_project.as_ref() {
-            format!(
-                "Quick create for {} in project {}: enter title",
-                self.focus_date, project.title
-            )
+            format!("Quick create in project {}: enter title", project.title)
         } else {
-            format!("Quick create for {}: enter title", self.focus_date)
+            "Quick create: enter title".to_string()
         };
     }
 
@@ -850,7 +847,7 @@ impl App {
                         title: title.clone(),
                         details: String::new(),
                         due: None,
-                        scheduled: Some(self.focus_date.clone()),
+                        scheduled: None,
                         priority: None,
                         status: None,
                         recurrence: None,
@@ -860,7 +857,7 @@ impl App {
                     self.input_mode = InputMode::None;
                     self.input_value.clear();
                     self.append_cached_task(created);
-                    self.status = format!("Quick created {} for {}", title, self.focus_date);
+                    self.status = format!("Quick created {}", title);
                 }
             }
             InputMode::CreateTitle => {

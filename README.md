@@ -73,7 +73,7 @@ When the date view (`2`) is active, the task list shows tasks for the focused da
 | `S` | Skip / unskip a recurring instance |
 | `P` | Toggle active project on selected task |
 | `n` | Create task (multi-step: title, dates, priority, status, recurrence) |
-| `c` | Quick create (title only, scheduled to focused date, linked to active project if set) |
+| `c` | Quick create (title only, no dates, linked to active project if set) |
 | `e` | Edit title |
 | `i` | Open in `$EDITOR` |
 | `d` | Edit due date |
