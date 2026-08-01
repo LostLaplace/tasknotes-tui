@@ -219,17 +219,28 @@ impl TaskRepository {
     pub fn read_task(&self, path: &str) -> anyhow::Result<TaskRecord> {
         let collection = self.collection()?;
         let result = collection.read(&json!({ "path": path }));
-        let raw = result
+        // mdbase's "frontmatter" is the *effective* view (schema defaults merged in);
+        // "raw_frontmatter" is exactly what's on disk. normalized_frontmatter uses the
+        // former (correct for display/filtering — a defaulted value should read as
+        // that default), but TaskRecord.raw_frontmatter must stay the latter, since
+        // it's the baseline every update call site diffs against to avoid writing
+        // defaults that were never actually set (see `diff_from_baseline`).
+        let effective = result
             .get("frontmatter")
             .and_then(Value::as_object)
             .cloned()
             .context("read missing frontmatter")?;
+        let raw = result
+            .get("raw_frontmatter")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_else(|| effective.clone());
         let body = result
             .get("body")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let normalized = normalize_frontmatter(&raw, &self.field_mapping);
+        let normalized = normalize_frontmatter(&effective, &self.field_mapping);
         Ok(TaskRecord {
             path: path.to_string(),
             title: resolve_display_title(&normalized, &self.field_mapping, Some(path))
@@ -268,7 +279,8 @@ impl TaskRepository {
     }
 
     pub fn toggle_time_tracking(&self, task: &TaskRecord) -> anyhow::Result<TaskRecord> {
-        let mut normalized = self.read_task(&task.path)?.normalized_frontmatter;
+        let baseline = self.read_task(&task.path)?.normalized_frontmatter;
+        let mut normalized = baseline.clone();
         let entries = normalized
             .get("timeEntries")
             .and_then(Value::as_array)
@@ -285,12 +297,13 @@ impl TaskRepository {
         if let Some(date_modified) = result.get("dateModified") {
             normalized.insert("dateModified".into(), date_modified.clone());
         }
-        self.write_task_update(task, normalized)
+        self.write_task_update(task, &baseline, normalized)
     }
 
     pub fn toggle_complete(&self, task: &TaskRecord) -> anyhow::Result<TaskRecord> {
         let collection = self.collection()?;
-        let mut normalized = task.normalized_frontmatter.clone();
+        let baseline = task.normalized_frontmatter.clone();
+        let mut normalized = baseline.clone();
         let is_recurring = normalized
             .get("recurrence")
             .and_then(Value::as_str)
@@ -417,7 +430,10 @@ impl TaskRepository {
             "dateModified".into(),
             Value::String(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
         );
-        let fields = denormalize_frontmatter(&normalized, &self.field_mapping);
+        let fields = denormalize_frontmatter(
+            &diff_from_baseline(&normalized, &baseline),
+            &self.field_mapping,
+        );
         let result = collection.update(&json!({ "path": task.path, "fields": fields }));
         if let Some(error) = result.get("error") {
             return Err(anyhow!("update failed: {}", error));
@@ -426,7 +442,8 @@ impl TaskRepository {
     }
 
     pub fn toggle_skip_today(&self, task: &TaskRecord) -> anyhow::Result<TaskRecord> {
-        let mut normalized = task.normalized_frontmatter.clone();
+        let baseline = task.normalized_frontmatter.clone();
+        let mut normalized = baseline.clone();
         let is_recurring = normalized
             .get("recurrence")
             .and_then(Value::as_str)
@@ -469,7 +486,7 @@ impl TaskRepository {
                     .collect::<Vec<_>>(),
             ),
         );
-        self.write_task_update(task, normalized)
+        self.write_task_update(task, &baseline, normalized)
     }
 
     pub fn create_task(&self, title: &str) -> anyhow::Result<TaskRecord> {
@@ -711,7 +728,10 @@ impl TaskRepository {
             title,
             &self.config.title.storage,
         );
-        let fields = denormalize_frontmatter(&normalized, &self.field_mapping);
+        let fields = denormalize_frontmatter(
+            &diff_from_baseline(&normalized, &task.normalized_frontmatter),
+            &self.field_mapping,
+        );
         let result = collection.update(&json!({ "path": old_path, "fields": fields }));
         if let Some(error) = result.get("error") {
             return Err(anyhow!("update failed: {}", error));
@@ -737,7 +757,8 @@ impl TaskRepository {
         field: &str,
         value: Option<&str>,
     ) -> anyhow::Result<TaskRecord> {
-        let mut normalized = self.read_task(&task.path)?.normalized_frontmatter;
+        let baseline = self.read_task(&task.path)?.normalized_frontmatter;
+        let mut normalized = baseline.clone();
         match value.map(str::trim).filter(|value| !value.is_empty()) {
             Some(value) => {
                 normalized.insert(field.to_string(), Value::String(value.to_string()));
@@ -746,7 +767,7 @@ impl TaskRepository {
                 normalized.insert(field.to_string(), Value::Null);
             }
         }
-        self.write_task_update(task, normalized)
+        self.write_task_update(task, &baseline, normalized)
     }
 
     pub fn update_scalar_field(
@@ -755,7 +776,8 @@ impl TaskRepository {
         field: &str,
         value: Option<&str>,
     ) -> anyhow::Result<TaskRecord> {
-        let mut normalized = self.read_task(&task.path)?.normalized_frontmatter;
+        let baseline = self.read_task(&task.path)?.normalized_frontmatter;
+        let mut normalized = baseline.clone();
         match value.map(str::trim).filter(|value| !value.is_empty()) {
             Some(value) => {
                 normalized.insert(field.to_string(), Value::String(value.to_string()));
@@ -764,7 +786,7 @@ impl TaskRepository {
                 normalized.insert(field.to_string(), Value::Null);
             }
         }
-        self.write_task_update(task, normalized)
+        self.write_task_update(task, &baseline, normalized)
     }
 
     pub fn delete_task(&self, task: &TaskRecord) -> anyhow::Result<()> {
@@ -790,13 +812,18 @@ impl TaskRepository {
 
     fn archive_task(&self, task: &TaskRecord) -> anyhow::Result<TaskRecord> {
         let collection = self.collection()?;
-        let mut normalized = self.read_task(&task.path)?.normalized_frontmatter;
+        let fresh = self.read_task(&task.path)?;
+        let baseline = fresh.normalized_frontmatter.clone();
+        let mut normalized = fresh.normalized_frontmatter;
         ensure_archive_markers(&mut normalized, &self.config.archive);
         normalized.insert(
             "dateModified".into(),
             Value::String(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
         );
-        let fields = denormalize_frontmatter(&normalized, &self.field_mapping);
+        let fields = denormalize_frontmatter(
+            &diff_from_baseline(&normalized, &baseline),
+            &self.field_mapping,
+        );
         let result = collection.update(&json!({ "path": task.path, "fields": fields }));
         if let Some(error) = result.get("error") {
             return Err(anyhow!("update failed: {}", error));
@@ -823,12 +850,16 @@ impl TaskRepository {
     fn unarchive_task(&self, task: &TaskRecord) -> anyhow::Result<TaskRecord> {
         let collection = self.collection()?;
         let mut current = self.read_task(&task.path)?;
+        let baseline = current.normalized_frontmatter.clone();
         clear_archive_markers(&mut current.normalized_frontmatter, &self.config.archive);
         current.normalized_frontmatter.insert(
             "dateModified".into(),
             Value::String(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
         );
-        let fields = denormalize_frontmatter(&current.normalized_frontmatter, &self.field_mapping);
+        let fields = denormalize_frontmatter(
+            &diff_from_baseline(&current.normalized_frontmatter, &baseline),
+            &self.field_mapping,
+        );
         let result = collection.update(&json!({ "path": current.path, "fields": fields }));
         if let Some(error) = result.get("error") {
             return Err(anyhow!("update failed: {}", error));
@@ -852,9 +883,19 @@ impl TaskRepository {
         self.read_task(&current_path)
     }
 
+    /// Writes `normalized` (the task's effective frontmatter with the caller's
+    /// intended changes applied) back to disk, sending only what actually differs
+    /// from `baseline` — the same effective frontmatter snapshot from *before* those
+    /// changes were made. Diffing against that pre-mutation snapshot (rather than
+    /// against raw on-disk content) is what makes this safe: schema-defaulted fields
+    /// the caller never touched are present identically in both `baseline` and
+    /// `normalized`, so they cancel out of the diff, while a field that only appears
+    /// in `baseline` because of defaulting still can't leak into `fields` — it was
+    /// never absent-then-present, just unchanged.
     fn write_task_update(
         &self,
         task: &TaskRecord,
+        baseline: &Map<String, Value>,
         mut normalized: Map<String, Value>,
     ) -> anyhow::Result<TaskRecord> {
         let collection = self.collection()?;
@@ -862,13 +903,36 @@ impl TaskRepository {
             "dateModified".into(),
             Value::String(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
         );
-        let fields = denormalize_frontmatter(&normalized, &self.field_mapping);
+        let fields = denormalize_frontmatter(
+            &diff_from_baseline(&normalized, baseline),
+            &self.field_mapping,
+        );
         let result = collection.update(&json!({ "path": task.path, "fields": fields }));
         if let Some(error) = result.get("error") {
             return Err(anyhow!("update failed: {}", error));
         }
         self.read_task(&task.path)
     }
+}
+
+/// Prunes `fields` (a task's effective frontmatter *after* a caller's intended
+/// changes were applied) down to only the entries that differ from `baseline` — the
+/// same effective frontmatter snapshot from *before* those changes. This must be the
+/// pre-mutation *effective* view, not the raw on-disk content: a schema-defaulted
+/// field the caller never touched is present identically in both snapshots (so it
+/// cancels out of the diff), whereas diffing against raw content would see it as
+/// "newly present" and wrongly resurrect it as a real, persisted value — exactly the
+/// defaults-leaking-onto-disk bug `write_defaults = false` (see `collection()`) only
+/// half-fixes, since that setting stops *implicit* default-merging but does nothing
+/// once a default value is already sitting in the fields payload explicitly.
+fn diff_from_baseline(fields: &Map<String, Value>, baseline: &Map<String, Value>) -> Map<String, Value> {
+    let mut result = Map::new();
+    for (key, value) in fields {
+        if baseline.get(key) != Some(value) {
+            result.insert(key.clone(), value.clone());
+        }
+    }
+    result
 }
 
 fn type_def_to_create_compat(type_def: &TypeDef) -> Value {
@@ -1765,13 +1829,14 @@ fields:
         repo.update_date_field(&task[0], "scheduled", Some(today.as_str()))
             .unwrap();
         let mut recurring = repo.read_task(&task[0].path).unwrap();
+        let baseline = recurring.normalized_frontmatter.clone();
         recurring
             .normalized_frontmatter
             .insert("recurrence".into(), Value::String("FREQ=DAILY".into()));
         recurring
             .normalized_frontmatter
             .insert("recurrenceAnchor".into(), Value::String("scheduled".into()));
-        repo.write_task_update(&recurring, recurring.normalized_frontmatter.clone())
+        repo.write_task_update(&recurring, &baseline, recurring.normalized_frontmatter.clone())
             .unwrap();
         let recurring = repo.read_task(&task[0].path).unwrap();
         repo.toggle_skip_today(&recurring).unwrap();
@@ -1801,13 +1866,14 @@ fields:
         repo.update_date_field(&task[0], "scheduled", Some(today.as_str()))
             .unwrap();
         let mut recurring = repo.read_task(&task[0].path).unwrap();
+        let baseline = recurring.normalized_frontmatter.clone();
         recurring
             .normalized_frontmatter
             .insert("recurrence".into(), Value::String("FREQ=DAILY".into()));
         recurring
             .normalized_frontmatter
             .insert("recurrenceAnchor".into(), Value::String("scheduled".into()));
-        repo.write_task_update(&recurring, recurring.normalized_frontmatter.clone())
+        repo.write_task_update(&recurring, &baseline, recurring.normalized_frontmatter.clone())
             .unwrap();
 
         let recurring = repo.read_task(&task[0].path).unwrap();
@@ -1851,13 +1917,14 @@ fields:
         repo.update_date_field(&task[0], "scheduled", Some(today.as_str()))
             .unwrap();
         let mut recurring = repo.read_task(&task[0].path).unwrap();
+        let baseline = recurring.normalized_frontmatter.clone();
         recurring
             .normalized_frontmatter
             .insert("recurrence".into(), Value::String("FREQ=DAILY".into()));
         recurring
             .normalized_frontmatter
             .insert("recurrenceAnchor".into(), Value::String("scheduled".into()));
-        repo.write_task_update(&recurring, recurring.normalized_frontmatter.clone())
+        repo.write_task_update(&recurring, &baseline, recurring.normalized_frontmatter.clone())
             .unwrap();
 
         let recurring = repo.read_task(&task[0].path).unwrap();
@@ -2294,6 +2361,103 @@ fields:
         // defaults would otherwise apply).
         assert!(raw.contains("status:"), "raw frontmatter was:\n{raw}");
         assert!(raw.contains("priority: normal"), "raw frontmatter was:\n{raw}");
+    }
+
+    #[test]
+    fn updating_a_task_does_not_stamp_optional_defaults_either() {
+        let tmp = tempdir().unwrap();
+        fs::write(
+            tmp.path().join("mdbase.yaml"),
+            r#"spec_version: "0.2.1"
+settings:
+  types_folder: "_types"
+  default_validation: "warn"
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(tmp.path().join("_types")).unwrap();
+        fs::write(
+            tmp.path().join("tasknotes.yaml"),
+            r#"task_detection:
+  method: property
+  property_name: status
+  property_value: ""
+"#,
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("_types/task.md"),
+            r#"---
+name: task
+path_pattern: "TaskNotes/Tasks/{title}.md"
+match:
+  where:
+    tags:
+      contains: "task"
+fields:
+  title:
+    type: string
+    required: true
+  status:
+    type: enum
+    required: true
+    default: inbox
+  priority:
+    type: enum
+    required: true
+    default: normal
+  due:
+    type: date
+  recurrenceAnchor:
+    type: enum
+    default: scheduled
+  occurrenceMaterialization:
+    type: enum
+    default: manual
+  dateCreated:
+    type: datetime
+    required: true
+  dateModified:
+    type: datetime
+---
+"#,
+        )
+        .unwrap();
+        fs::create_dir_all(tmp.path().join("TaskNotes/Tasks")).unwrap();
+
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        let created = repo
+            .create_task_from_draft(&TaskDraft {
+                title: "Plain task".into(),
+                details: "".into(),
+                due: None,
+                scheduled: None,
+                priority: None,
+                status: None,
+                recurrence: None,
+                recurrence_anchor: None,
+                projects: vec![],
+            })
+            .unwrap();
+
+        // Clearing an already-unset date field is a no-op write, but it still goes
+        // through collection.update() — make sure that path doesn't stamp defaults
+        // for fields nobody touched, same as create.
+        repo.update_date_field(&created, "due", None).unwrap();
+        let task = repo.read_task(&created.path).unwrap();
+        let task = repo.toggle_complete(&task).unwrap();
+        let task = repo.toggle_complete(&task).unwrap(); // back to open
+        let task = repo.update_title(&task, "Renamed task").unwrap();
+        let task = repo.toggle_archive(&task).unwrap();
+        let task = repo.toggle_archive(&task).unwrap(); // back to unarchived
+
+        let raw = fs::read_to_string(tmp.path().join(&task.path)).unwrap();
+        assert!(!raw.contains("recurrenceAnchor"), "raw frontmatter was:\n{raw}");
+        assert!(
+            !raw.contains("occurrenceMaterialization"),
+            "raw frontmatter was:\n{raw}"
+        );
+        assert!(!raw.contains("due:"), "raw frontmatter was:\n{raw}");
     }
 
     #[test]

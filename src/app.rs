@@ -1648,8 +1648,12 @@ impl App {
     fn begin_date_picker(&mut self, mode: InputMode, initial: Option<&str>) {
         self.input_mode = mode;
         self.input_value.clear();
+        // No existing value: start cleared rather than silently pre-filled with today,
+        // so pressing Enter without touching the picker leaves the field unset. The
+        // cursor still starts on today so `t`/arrow keys/Enter-after-moving are all one
+        // keystroke away from picking it.
         self.picker_date = initial.map(get_date_part).unwrap_or_else(today_local);
-        self.picker_has_value = true;
+        self.picker_has_value = initial.is_some();
     }
 
     fn current_picker_value(&self) -> Option<String> {
@@ -2536,5 +2540,81 @@ fields:
             created.normalized_frontmatter.get("projects"),
             Some(&serde_json::json!(["[[Plan release]]"]))
         );
+    }
+
+    #[test]
+    fn editing_an_unset_date_starts_cleared_and_submitting_leaves_it_unset() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task("No dates yet").unwrap();
+
+        let mut app = App::new(repo, TuiConfig::default()).unwrap();
+        app.selected = 0;
+
+        app.begin_edit_due();
+        assert_eq!(app.input_mode, InputMode::PickEditDue);
+        assert!(!app.picker_has_value);
+
+        app.submit_input().unwrap();
+        let updated = app.all_tasks.iter().find(|t| t.title == "No dates yet").unwrap();
+        assert_eq!(updated.due, None);
+    }
+
+    #[test]
+    fn editing_an_already_set_date_still_starts_prefilled() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        repo.create_task_from_draft(&TaskDraft {
+            title: "Has a due date".into(),
+            details: String::new(),
+            due: Some("2026-05-01".into()),
+            scheduled: None,
+            priority: None,
+            status: Some("open".into()),
+            recurrence: None,
+            recurrence_anchor: None,
+            projects: vec![],
+        })
+        .unwrap();
+
+        let mut app = App::new(repo, TuiConfig::default()).unwrap();
+        app.selected = 0;
+
+        app.begin_edit_due();
+        assert!(app.picker_has_value);
+        assert_eq!(app.picker_date, "2026-05-01");
+
+        app.submit_input().unwrap();
+        let updated = app
+            .all_tasks
+            .iter()
+            .find(|t| t.title == "Has a due date")
+            .unwrap();
+        assert_eq!(updated.due.as_deref(), Some("2026-05-01"));
+    }
+
+    #[test]
+    fn create_flow_due_and_scheduled_steps_start_cleared() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+
+        let mut app = App::new(repo, TuiConfig::default()).unwrap();
+        app.begin_create();
+        app.input_value = "New task".into();
+        app.submit_input().unwrap();
+        app.input_value.clear();
+        app.submit_input().unwrap();
+        assert_eq!(app.input_mode, InputMode::PickCreateProject);
+        app.submit_input().unwrap();
+        assert_eq!(app.input_mode, InputMode::PickCreateDue);
+        assert!(!app.picker_has_value);
+
+        app.submit_input().unwrap();
+        assert_eq!(app.input_mode, InputMode::PickCreateScheduled);
+        assert!(!app.picker_has_value);
+        assert_eq!(app.draft.due, None);
     }
 }

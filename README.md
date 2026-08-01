@@ -85,15 +85,18 @@ When the date view (`2`) is active, the task list shows tasks for the focused da
 
 ### Date picker
 
-When editing due or scheduled dates, a date picker opens:
+When editing due or scheduled dates, a date picker opens. If the field doesn't already
+have a value, it opens cleared — pressing `Enter` immediately leaves it unset rather
+than silently filling in today's date. The calendar cursor still starts on today, so
+picking it is one keystroke away (`t`, or any arrow key):
 
-- Arrow keys or `h`/`l` — move by day
+- Arrow keys or `h`/`l` — move by day (also picks the highlighted day)
 - `j`/`k` — move by week
 - `H`/`L` — move by month
 - `t` — jump to today
 - `c` — clear the value
 - `/` — switch to manual `YYYY-MM-DD` entry
-- `Enter` — save
+- `Enter` — save whatever is currently selected (or leave unset if nothing was picked)
 
 ### Command palette
 

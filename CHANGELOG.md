@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.9 - 2026-08-01
+
+- date pickers now open cleared instead of pre-filled with today's date when a field has no existing value (creating a task, or editing due/scheduled on a task that doesn't have one set); the calendar cursor still starts on today, so `t` or any arrow key picks it in one keystroke
+- fix a correctness bug where editing *any* task field (toggling complete, renaming, archiving, editing due/scheduled/priority/status, time tracking) could silently write schema-default values (e.g. `occurrence_materialization`, `recurrence_anchor`) into that task's frontmatter, even though they were never actually set — a gap in the v0.1.6 fix, which only covered task creation, not edits
+
 ## v0.1.8 - 2026-08-01
 
 - add `Shift-N` in the Projects view to quick-create a task linked to the highlighted project, with status pre-set to the first configured `next_action_statuses` value
