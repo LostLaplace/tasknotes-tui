@@ -163,6 +163,10 @@ Project-aware expression helpers are also available:
 - `activeProjectTitle`
 - `isActiveProject`
 - `projectPaths` — resolved project targets for the current task
+- `isProject` — true if this task's own path is itself referenced as a project by some
+  other task's `projects:` field (the project-as-task pattern). Useful for keeping
+  project notes out of actionable-task views, e.g.
+  `where: "status == \"next_action\" && !isProject"`
 
 ```yaml
 views:

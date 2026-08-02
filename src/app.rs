@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 
 use crate::date::{apply_day_offset, apply_month_offset, get_date_part, today_local};
 use crate::repository::{
-    build_project_summaries, task_matches_project, ProjectSummary, TaskDraft, TaskFilter,
-    TaskRecord, TaskRepository,
+    build_project_summaries, resolved_project_paths, task_matches_project, ProjectSummary,
+    TaskDraft, TaskFilter, TaskRecord, TaskRepository,
 };
 use crate::tui_config::{KeyCommand, TuiConfig, ViewConfig, ViewFilter, ViewSort};
 use crate::urgency::compute_urgency;
@@ -333,7 +333,9 @@ impl App {
 
     pub fn reload_from_disk(&mut self) -> Result<()> {
         self.all_tasks = self.repo.list_tasks(TaskFilter::All, &self.focus_date)?;
-        self.view_eval_support = Some(self.repo.build_view_eval_support()?);
+        let support = self.repo.build_view_eval_support()?;
+        let project_note_paths = resolved_project_paths(&self.all_tasks, &support.all_files);
+        self.view_eval_support = Some(support.with_project_note_paths(project_note_paths));
         self.calendar_tasks = self.all_tasks.clone();
         self.apply_filters();
         Ok(())

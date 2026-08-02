@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.1.10 - 2026-08-02
+
+- add an `isProject` expression variable: true when a task's own path is referenced as a
+  project by some other task's `projects:` field (the project-as-task pattern), so
+  expression views can filter project notes out of actionable-task lists, e.g.
+  `where: "status == \"next_action\" && !isProject"`
+
 ## v0.1.9 - 2026-08-01
 
 - date pickers now open cleared instead of pre-filled with today's date when a field has no existing value (creating a task, or editing due/scheduled on a task that doesn't have one set); the calendar cursor still starts on today, so `t` or any arrow key picks it in one keystroke

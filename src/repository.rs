@@ -1156,6 +1156,26 @@ pub fn task_matches_project(task: &TaskRecord, key: &str, all_files: &[ResolvedF
         .any(|raw| project_link_key(raw, &task.path, all_files).as_deref() == Some(key))
 }
 
+/// Every task path that is itself referenced as a project by some other task's
+/// `projects:` field (the "project-as-task" pattern) — regardless of that task's own
+/// status or archive state, since a project note's own frontmatter is unrelated to
+/// whether it's still being pointed at. Phantom (unresolved) project links contribute
+/// nothing here, since there's no task path to exclude.
+pub fn resolved_project_paths(
+    tasks: &[TaskRecord],
+    all_files: &[ResolvedFileData],
+) -> std::collections::HashSet<String> {
+    let mut paths = std::collections::HashSet::new();
+    for task in tasks {
+        for raw in project_links(task) {
+            if let Some(resolved) = resolve_link_value(&raw, &task.path, all_files) {
+                paths.insert(resolved);
+            }
+        }
+    }
+    paths
+}
+
 fn earliest_date(current: &Option<String>, candidate: Option<&str>) -> Option<String> {
     match (current, candidate) {
         (Some(current), Some(candidate)) => {
@@ -1813,6 +1833,45 @@ fields:
         );
 
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn resolved_project_paths_includes_only_resolved_project_note_paths() {
+        let tmp = tempdir().unwrap();
+        write_collection(tmp.path());
+        let repo = TaskRepository::open(tmp.path()).unwrap();
+        let project = repo
+            .create_task_from_draft(&TaskDraft {
+                title: "Project Alpha".into(),
+                details: String::new(),
+                due: None,
+                scheduled: None,
+                priority: None,
+                status: Some("open".into()),
+                recurrence: None,
+                recurrence_anchor: None,
+                projects: vec![],
+            })
+            .unwrap();
+        repo.create_task_from_draft(&draft_with_project(
+            "Child of resolved project",
+            "open",
+            "[[Project Alpha]]",
+        ))
+        .unwrap();
+        repo.create_task_from_draft(&draft_with_project(
+            "Child of phantom project",
+            "open",
+            "[[Someday Project]]",
+        ))
+        .unwrap();
+
+        let tasks = repo.list_tasks(TaskFilter::All, &today_local()).unwrap();
+        let all_files = repo.build_view_eval_support().unwrap().all_files;
+        let paths = resolved_project_paths(&tasks, &all_files);
+
+        assert_eq!(paths.len(), 1);
+        assert!(paths.contains(&project.path));
     }
 
     #[test]

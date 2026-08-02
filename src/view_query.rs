@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use mdbase::expressions::ast::Expr;
@@ -22,6 +22,12 @@ pub struct ViewEvalSupport {
     pub backlinks_index: Arc<HashMap<String, Vec<String>>>,
     pub types: Arc<HashMap<String, TypeDef>>,
     pub type_names_by_path: Arc<HashMap<String, Vec<String>>>,
+    /// Task paths that are themselves referenced as a project by some other task's
+    /// `projects:` field (the "project-as-task" pattern). Empty until
+    /// [`ViewEvalSupport::with_project_note_paths`] is called, since deriving it needs
+    /// the full task list rather than just the raw collection. Backs the `isProject`
+    /// expression variable.
+    pub project_note_paths: Arc<HashSet<String>>,
 }
 
 impl ViewEvalSupport {
@@ -43,7 +49,13 @@ impl ViewEvalSupport {
             backlinks_index: Arc::new(backlinks_index),
             types: Arc::new(collection.types.clone()),
             type_names_by_path: Arc::new(type_names_by_path),
+            project_note_paths: Arc::new(HashSet::new()),
         }
+    }
+
+    pub fn with_project_note_paths(mut self, paths: HashSet<String>) -> Self {
+        self.project_note_paths = Arc::new(paths);
+        self
     }
 
     #[cfg(test)]
@@ -53,6 +65,7 @@ impl ViewEvalSupport {
             backlinks_index: Arc::new(HashMap::new()),
             types: Arc::new(HashMap::new()),
             type_names_by_path: Arc::new(HashMap::new()),
+            project_note_paths: Arc::new(HashSet::new()),
         }
     }
 }
@@ -248,6 +261,10 @@ fn build_eval_context(
                 .unwrap_or(false),
         ),
     );
+    frontmatter.insert(
+        "isProject".into(),
+        Value::Bool(support.project_note_paths.contains(&task.path)),
+    );
 
     EvalContext {
         frontmatter: Value::Object(frontmatter),
@@ -356,6 +373,35 @@ mod tests {
 
         assert!(compiled.error_message().is_some());
         assert!(!compiled.matches(
+            &task_record(),
+            "2026-04-10",
+            &default_field_mapping(),
+            &EffectiveConfig::default().archive,
+            &ViewEvalSupport::empty(),
+            None,
+            &UrgencyConfig::default(),
+        ));
+    }
+
+    #[test]
+    fn is_project_expression_variable_reflects_project_note_paths() {
+        let compiled = CompiledViewFilter::from_filter(&ViewFilter::Expression {
+            value: "!isProject".into(),
+        });
+        let mut project_paths = HashSet::new();
+        project_paths.insert(task_record().path.clone());
+        let support = ViewEvalSupport::empty().with_project_note_paths(project_paths);
+
+        assert!(!compiled.matches(
+            &task_record(),
+            "2026-04-10",
+            &default_field_mapping(),
+            &EffectiveConfig::default().archive,
+            &support,
+            None,
+            &UrgencyConfig::default(),
+        ));
+        assert!(compiled.matches(
             &task_record(),
             "2026-04-10",
             &default_field_mapping(),
